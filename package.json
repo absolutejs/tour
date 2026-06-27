@@ -27,7 +27,7 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"types": "./dist/index.d.ts",
-	"version": "0.0.1-beta.0",
+	"version": "0.1.0-beta.0",
 	"peerDependencies": {
 		"vue": ">=3.3",
 		"vue-router": ">=4"

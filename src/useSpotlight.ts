@@ -7,23 +7,26 @@ import {
 	watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import type { TourStep } from "./types";
+import type { TourStep, TourTheme } from "./types";
 import type { TourController } from "./controller";
 
 const TOOLTIP_WIDTH = 340;
 const GAP = 14;
-const PAD = 6;
+const DEFAULT_PAD = 6;
+const DEFAULT_RADIUS = 12;
 const VIEWPORT_MARGIN = 12;
 const TARGET_WAIT_MS = 3500;
 // Re-measure at these delays (ms) after a step so the spotlight settles exactly
 // once scroll + late layout finish.
 const SETTLE_DELAYS_MS = [120, 300, 600];
 // And on this light interval while active, to follow LATE reflows (a page
-// loading its data and resizing its header after we measured) — those emit no
-// scroll/resize event.
+// loading its data and resizing its header after we measured).
 const TRACK_INTERVAL_MS = 150;
 const FLIP_RESERVE = 220;
 const MAX_TOOLTIP_TOP = 160;
+const DEFAULT_DIM = 0.62;
+const DEFAULT_TIMER_MS = 6000;
+const DEFAULT_TRANSITION_MS = 260;
 
 export type SpotlightOptions = {
 	/** The ordered steps to walk. A getter so it can be reactive/swappable. */
@@ -32,6 +35,8 @@ export type SpotlightOptions = {
 	controller: TourController;
 	/** Called when the user finishes the last step or skips. */
 	onClose: () => void;
+	/** Optional per-tutorial theme → exposed as CSS custom properties. */
+	theme?: () => TourTheme | undefined;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -68,6 +73,8 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	const targetRect = ref<DOMRect | null>(null);
 	let currentEl: Element | null = null;
 	let locateToken = 0;
+	let advanceTimer = 0;
+	let clickAdvanceEl: Element | null = null;
 
 	const steps = computed(() => options.steps());
 	const step = computed(() => steps.value[index.value] ?? null);
@@ -76,13 +83,58 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	const isFirst = computed(() => index.value === 0);
 	const isCentered = computed(() => !targetRect.value);
 
+	const pad = computed(() => step.value?.spotlight?.padding ?? DEFAULT_PAD);
+
 	const measure = () => {
 		if (currentEl) targetRect.value = currentEl.getBoundingClientRect();
+	};
+
+	const next = () => {
+		if (isLast.value) {
+			onClose();
+
+			return;
+		}
+		index.value += 1;
+	};
+	const back = () => {
+		if (index.value > 0) index.value -= 1;
+	};
+	const skip = () => onClose();
+
+	// Tear down any per-step advance hooks (timer / click-to-advance).
+	const clearAdvance = () => {
+		if (advanceTimer) {
+			clearTimeout(advanceTimer);
+			advanceTimer = 0;
+		}
+		if (clickAdvanceEl) {
+			clickAdvanceEl.removeEventListener("click", onTargetClick);
+			clickAdvanceEl = null;
+		}
+	};
+	function onTargetClick() {
+		next();
+	}
+
+	const armAdvance = (node: Element | null) => {
+		const advance = step.value?.advance;
+		if (!advance || !advance.on || advance.on === "button") return;
+		if (advance.on === "timer") {
+			advanceTimer = window.setTimeout(
+				() => next(),
+				advance.delayMs ?? DEFAULT_TIMER_MS,
+			);
+		} else if (advance.on === "target-click" && node) {
+			clickAdvanceEl = node;
+			node.addEventListener("click", onTargetClick);
+		}
 	};
 
 	const locate = async () => {
 		locateToken += 1;
 		const token = locateToken;
+		clearAdvance();
 		currentEl = null;
 		targetRect.value = null;
 		const current = step.value;
@@ -92,7 +144,11 @@ export const useSpotlight = (options: SpotlightOptions) => {
 			await router.push(current.route);
 		}
 		if (token !== locateToken) return;
-		if (!current.target) return; // centered card
+		if (!current.target) {
+			armAdvance(null); // timer can still drive a centered step
+
+			return;
+		}
 
 		const node = await waitForEl(current.target, TARGET_WAIT_MS);
 		if (token !== locateToken || !node) return;
@@ -105,22 +161,8 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		};
 		requestAnimationFrame(remeasure);
 		SETTLE_DELAYS_MS.forEach((delay) => setTimeout(remeasure, delay));
+		armAdvance(node);
 	};
-
-	const next = () => {
-		if (isLast.value) {
-			onClose();
-
-			return;
-		}
-		index.value += 1;
-	};
-
-	const back = () => {
-		if (index.value > 0) index.value -= 1;
-	};
-
-	const skip = () => onClose();
 
 	const onKey = (event: KeyboardEvent) => {
 		if (!active.value) return;
@@ -132,17 +174,73 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	const spotlightStyle = computed(() => {
 		const rect = targetRect.value;
 		if (!rect) return { display: "none" };
+		const space = pad.value;
+		const circle = step.value?.spotlight?.shape === "circle";
+		const radius = circle
+			? "50%"
+			: `${step.value?.spotlight?.radius ?? DEFAULT_RADIUS}px`;
 
 		return {
-			height: `${rect.height + PAD * 2}px`,
-			left: `${rect.left - PAD}px`,
-			top: `${rect.top - PAD}px`,
-			width: `${rect.width + PAD * 2}px`,
+			borderRadius: radius,
+			height: `${rect.height + space * 2}px`,
+			left: `${rect.left - space}px`,
+			top: `${rect.top - space}px`,
+			width: `${rect.width + space * 2}px`,
 		};
 	});
 
-	// Position the tooltip relative to the target, honoring placement but
-	// flipping/clamping so it always stays on-screen.
+	// The click-blocking layer(s). Normally one full-screen blocker; when the
+	// step allows interaction, four rects AROUND the target so the highlighted
+	// element stays clickable (the visual dim still comes from the spotlight's
+	// box-shadow).
+	const blockers = computed(() => {
+		const rect = targetRect.value;
+		const full: Record<string, string> = {
+			bottom: "0",
+			left: "0",
+			right: "0",
+			top: "0",
+		};
+		if (!rect || !step.value?.spotlight?.allowInteraction) return [full];
+
+		const space = pad.value;
+		const bandTop: Record<string, string> = {
+			bottom: "auto",
+			height: `${Math.max(0, rect.top - space)}px`,
+			left: "0",
+			right: "0",
+			top: "0",
+		};
+		const bandBottom: Record<string, string> = {
+			bottom: "0",
+			left: "0",
+			right: "0",
+			top: `${rect.bottom + space}px`,
+		};
+		const bandLeft: Record<string, string> = {
+			height: `${rect.height + space * 2}px`,
+			left: "0",
+			top: `${rect.top - space}px`,
+			width: `${Math.max(0, rect.left - space)}px`,
+		};
+		const bandRight: Record<string, string> = {
+			height: `${rect.height + space * 2}px`,
+			left: `${rect.right + space}px`,
+			right: "0",
+			top: `${rect.top - space}px`,
+		};
+
+		return [bandTop, bandBottom, bandLeft, bandRight];
+	});
+
+	const showBeacon = computed(() => Boolean(step.value?.beacon && targetRect.value));
+	const beaconStyle = computed(() => {
+		const rect = targetRect.value;
+		if (!rect) return { display: "none" };
+
+		return { left: `${rect.right - 6}px`, top: `${rect.top - 6}px` };
+	});
+
 	const tooltipStyle = computed(() => {
 		const rect = targetRect.value;
 		if (!rect) return {};
@@ -183,8 +281,34 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		return { left: `${left}px`, top: `${rect.bottom + GAP}px` };
 	});
 
+	// Entrance animation for the card — re-keyed per step so it replays.
+	const cardAnimationStyle = computed(() => {
+		const transition = step.value?.transition;
+		const kind = transition?.kind ?? "fade";
+		if (kind === "none") return {};
+		const ms = transition?.durationMs ?? DEFAULT_TRANSITION_MS;
+
+		return { animation: `tour-${kind} ${ms}ms cubic-bezier(0.16,1,0.3,1)` };
+	});
+
+	// Per-tutorial theme → CSS custom properties (only the ones provided).
+	const themeVars = computed(() => {
+		const theme = options.theme?.();
+		const vars: Record<string, string> = {
+			"--tour-dim": String(theme?.dimOpacity ?? DEFAULT_DIM),
+		};
+		if (theme?.accent) vars["--tour-accent"] = theme.accent;
+		if (theme?.accentText) vars["--tour-accent-text"] = theme.accentText;
+		if (theme?.surface) vars["--tour-surface"] = theme.surface;
+		if (theme?.textColor) vars["--tour-text"] = theme.textColor;
+		if (theme?.radius) vars["--tour-radius"] = theme.radius;
+
+		return vars;
+	});
+
 	watch(active, (isActive) => {
 		if (isActive) void locate();
+		else clearAdvance();
 	});
 	watch(index, () => void locate());
 
@@ -196,7 +320,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		trackTimer = window.setInterval(() => {
 			if (active.value && currentEl) measure();
 		}, TRACK_INTERVAL_MS);
-		// Resume after a cross-page reload — index/active are restored from storage.
+		// Resume after a cross-page reload — index/active restored from storage.
 		if (active.value) void locate();
 	});
 	onBeforeUnmount(() => {
@@ -204,24 +328,26 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		window.removeEventListener("scroll", measure, true);
 		window.removeEventListener("keydown", onKey);
 		clearInterval(trackTimer);
+		clearAdvance();
 	});
 
 	return {
 		active,
 		back,
+		beaconStyle,
+		blockers,
+		cardAnimationStyle,
 		index,
 		isCentered,
 		isFirst,
 		isLast,
 		next,
+		showBeacon,
 		skip,
 		spotlightStyle,
 		step,
 		stepCount,
+		themeVars,
 		tooltipStyle,
-		// The tuned constants, exposed so the host's view can match its padding/
-		// ring to the engine's measurements.
-		PAD,
-		TOOLTIP_WIDTH,
 	};
 };
