@@ -1,0 +1,16 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# build output
+/dist
+
+# absolute CLI cache
+.absolutejs/
+
+# logs
+*.log
+
+# OS
+.DS_Store

@@ -1,0 +1,40 @@
+{
+	"author": "Alex Kahn",
+	"description": "Element-level, cross-page product tour engine for AbsoluteJS apps. A serializable step protocol plus a spotlight positioning engine (pixel-accurate, follows late layout shifts) and a sessionStorage-backed controller that resumes across full-page navigations. Vue + vue-router are peer dependencies.",
+	"license": "BUSL-1.1",
+	"publishConfig": {
+		"access": "public"
+	},
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
+	"type": "module",
+	"name": "@absolutejs/tour",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/absolutejs/tour.git"
+	},
+	"homepage": "https://github.com/absolutejs/tour",
+	"bugs": {
+		"url": "https://github.com/absolutejs/tour/issues"
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --external vue --external vue-router && tsc --emitDeclarationOnly --project tsconfig.json",
+		"typecheck": "tsc --noEmit"
+	},
+	"types": "./dist/index.d.ts",
+	"version": "0.0.1-beta.0",
+	"peerDependencies": {
+		"vue": ">=3.3",
+		"vue-router": ">=4"
+	},
+	"devDependencies": {
+		"typescript": "^6.0.3",
+		"vue": "^3.5.38",
+		"vue-router": "^4.4.0"
+	}
+}
