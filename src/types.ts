@@ -61,6 +61,45 @@ export type TourActionRef = {
  *  when they don't; "demo" / "live" force one side. */
 export type TourDataMode = "auto" | "demo" | "live";
 
+/**
+ * A serializable predicate reference — `condition` names either a built-in
+ * ("element" | "media") or a predicate the host registered on its
+ * TourConditionRegistry. Powers step branching (showIf/skipIf), waitFor, and
+ * trigger audience rules, all from plain JSON.
+ */
+export type TourConditionRef = {
+	condition: string;
+	args?: TourActionArgs;
+};
+
+/** Hold a step until the app is ready for it: a selector that must exist, or
+ *  a registered condition that must return true. Past `timeoutMs` (default
+ *  3500) the step shows anyway rather than stalling the tour. */
+export type TourWaitFor = {
+	selector?: string;
+	condition?: TourConditionRef;
+	timeoutMs?: number;
+};
+
+/** Small-screen overrides for a step — swap the target/placement/copy, or
+ *  skip the step entirely where its anchor doesn't exist (a collapsed
+ *  toolbar, a desktop-only panel). */
+export type TourStepMobile = {
+	target?: string;
+	placement?: TourPlacement;
+	title?: string;
+	body?: string;
+	skip?: boolean;
+};
+
+/** A call-to-action button in the step card ("Try it now") — runs action refs
+ *  through the same registry as onEnter, then advances unless advance:false. */
+export type TourCta = {
+	label: string;
+	actions?: TourActionRef[];
+	advance?: boolean;
+};
+
 export type TourTransitionKind = "fade" | "slide" | "scale" | "none";
 
 export type TourTransition = {
@@ -102,6 +141,17 @@ export type TourStep = {
 	onEnter?: TourActionRef[];
 	/** Actions to run when leaving the step (cleanup / restore). */
 	onExit?: TourActionRef[];
+	/** Every predicate must hold or the step is skipped (in the direction of
+	 *  travel). */
+	showIf?: TourConditionRef[];
+	/** Any predicate holding skips the step. */
+	skipIf?: TourConditionRef[];
+	/** Hold the step until the app is ready for it (selector / condition). */
+	waitFor?: TourWaitFor;
+	/** Small-screen target/placement/copy overrides, or skip on mobile. */
+	mobile?: TourStepMobile;
+	/** Optional call-to-action button rendered in the card. */
+	cta?: TourCta;
 };
 
 export type TourTrigger = {
@@ -111,6 +161,15 @@ export type TourTrigger = {
 	onRoutePrefix?: string;
 	/** Restrict auto-play to these role slugs (the host app decides how). */
 	roles?: string[];
+	/** Stop auto-playing after the viewer has skipped it this many times
+	 *  (useTourGate; default 2). They can still replay manually. */
+	maxDismissals?: number;
+	/** Auto-play at most once per browser session. */
+	oncePerSession?: boolean;
+	/** When several tutorials match a page, the highest priority wins. */
+	priority?: number;
+	/** Audience predicates — all must hold for auto-play (useTourGate). */
+	showIf?: TourConditionRef[];
 };
 
 /** Per-tutorial look. The engine exposes these as CSS custom properties so the

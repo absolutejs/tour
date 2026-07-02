@@ -2,8 +2,12 @@ export type {
 	TourActionArgValue,
 	TourActionArgs,
 	TourActionRef,
+	TourConditionRef,
+	TourCta,
 	TourDataMode,
 	TourStep,
+	TourStepMobile,
+	TourWaitFor,
 	TourPlacement,
 	TourMediaKind,
 	TourMedia,
@@ -32,3 +36,29 @@ export {
 	type TourDemoData,
 	type TourDemoOptions,
 } from "./useTourDemo";
+export {
+	evaluateTourCondition,
+	useTourConditions,
+	waitForTourCondition,
+	type TourConditionHandler,
+	type TourConditionRegistry,
+} from "./conditions";
+export type { TourEvent, TourEventName, TourEventSink } from "./events";
+export {
+	useTourGate,
+	type TourGate,
+	type TourGateOptions,
+	type TourGateState,
+} from "./gate";
+export {
+	useTourChecklist,
+	type TourChecklist,
+	type TourChecklistItem,
+	type TourChecklistOptions,
+} from "./checklist";
+export {
+	useTourHotspots,
+	type TourHotspot,
+	type TourHotspots,
+	type TourHotspotsOptions,
+} from "./hotspots";

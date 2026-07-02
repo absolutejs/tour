@@ -140,6 +140,7 @@ export const runTourActions = async (
 	refs: TourActionRef[] | undefined,
 	registry: TourActionRegistry,
 	context: Omit<TourActionContext, "args">,
+	hooks?: { onError?: (ref: TourActionRef, err: unknown) => void },
 ) => {
 	if (!refs || refs.length === 0) return;
 	for (const ref of refs) {
@@ -150,12 +151,14 @@ export const runTourActions = async (
 			registry.resolve(ref.action) ?? builtinActions[ref.action];
 		if (!handler) {
 			console.warn(`[tour] unknown action "${ref.action}"`);
+			hooks?.onError?.(ref, new Error("unknown action"));
 			continue;
 		}
 		try {
 			await handler({ ...context, args: ref.args ?? {} });
 		} catch (err) {
 			console.warn(`[tour] action "${ref.action}" failed`, err);
+			hooks?.onError?.(ref, err);
 		}
 	}
 };

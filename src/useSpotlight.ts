@@ -14,6 +14,13 @@ import {
 	useTourActions,
 	type TourActionRegistry,
 } from "./actions";
+import {
+	evaluateTourCondition,
+	useTourConditions,
+	waitForTourCondition,
+	type TourConditionRegistry,
+} from "./conditions";
+import type { TourEventName, TourEventSink } from "./events";
 
 const TOOLTIP_WIDTH = 340;
 const GAP = 14;
@@ -32,6 +39,7 @@ const MAX_TOOLTIP_TOP = 160;
 const DEFAULT_DIM = 0.62;
 const DEFAULT_TIMER_MS = 6000;
 const DEFAULT_TRANSITION_MS = 260;
+const DEFAULT_MOBILE_QUERY = "(max-width: 640px)";
 
 export type SpotlightOptions = {
 	/** The ordered steps to walk. A getter so it can be reactive/swappable. */
@@ -45,6 +53,17 @@ export type SpotlightOptions = {
 	/** Registry that resolves the steps' onEnter/onExit action names. Defaults
 	 *  to the shared useTourActions() registry. */
 	actions?: TourActionRegistry;
+	/** Registry that resolves showIf/skipIf/waitFor condition names. Defaults
+	 *  to the shared useTourConditions() registry. */
+	conditions?: TourConditionRegistry;
+	/** Funnel-event sink (started / viewed / completed / skipped / target
+	 *  missing / action failed). tour_skipped carries the exact step + route
+	 *  the viewer bailed on. */
+	onEvent?: TourEventSink;
+	/** The identity of the tutorial being played, stamped on every event. */
+	tutorialSlug?: () => string | undefined;
+	/** Media query below which steps' `mobile` overrides apply. */
+	mobileQuery?: string;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -79,12 +98,16 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	const route = useRoute();
 
 	const actions = options.actions ?? useTourActions();
+	const conditions = options.conditions ?? useTourConditions();
 
 	const targetRect = ref<DOMRect | null>(null);
 	let currentEl: Element | null = null;
 	let locateToken = 0;
 	let advanceTimer = 0;
 	let clickAdvanceEl: Element | null = null;
+	// Direction of travel (next vs back) so branch-skipped steps are hopped
+	// over the way the viewer is moving.
+	let lastIndex = 0;
 	// The step whose onEnter actions ran (and its element), so its onExit can
 	// run before the next step takes over — and the AbortController that cancels
 	// an in-flight action sequence when the step changes under it.
@@ -92,8 +115,30 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	let actionStep: TourStep | null = null;
 	let actionEl: Element | null = null;
 
+	// Small-screen overrides: below `mobileQuery` a step's `mobile` block wins
+	// (target/placement/copy), so the resolved step is what everything —
+	// positioning, rendering, events — sees.
+	const isMobile = ref(false);
+	let mobileMedia: MediaQueryList | null = null;
+	const onMobileMediaChange = () => {
+		isMobile.value = mobileMedia?.matches ?? false;
+	};
+	const resolveStep = (base: TourStep | null | undefined): TourStep | null => {
+		if (!base) return null;
+		if (!base.mobile || !isMobile.value) return base;
+		const mobile = base.mobile;
+
+		return {
+			...base,
+			...(mobile.target !== undefined ? { target: mobile.target } : {}),
+			...(mobile.placement ? { placement: mobile.placement } : {}),
+			...(mobile.title ? { title: mobile.title } : {}),
+			...(mobile.body ? { body: mobile.body } : {}),
+		};
+	};
+
 	const steps = computed(() => options.steps());
-	const step = computed(() => steps.value[index.value] ?? null);
+	const step = computed(() => resolveStep(steps.value[index.value]));
 	const stepCount = computed(() => steps.value.length);
 	const isLast = computed(() => index.value === steps.value.length - 1);
 	const isFirst = computed(() => index.value === 0);
@@ -105,8 +150,35 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		if (currentEl) targetRect.value = currentEl.getBoundingClientRect();
 	};
 
+	// Funnel events. The step/route on a tour_skipped is THE datapoint: the
+	// exact screen where the viewer had enough.
+	const emitEvent = (
+		name: TourEventName,
+		extra?: { reason?: string; step?: TourStep | null },
+	) => {
+		if (!options.onEvent) return;
+		const eventStep = extra && "step" in extra ? extra.step : step.value;
+		options.onEvent({
+			at: new Date().toISOString(),
+			isReplay: controller.isReplay.value,
+			name,
+			reason: extra?.reason,
+			route:
+				typeof window === "undefined"
+					? undefined
+					: window.location.pathname,
+			stepCount: stepCount.value,
+			stepIndex: index.value,
+			stepTitle: eventStep?.title,
+			target: eventStep?.target,
+			tutorialSlug: options.tutorialSlug?.(),
+		});
+	};
+
 	const next = () => {
+		emitEvent("step_completed");
 		if (isLast.value) {
+			emitEvent("tour_completed");
 			onClose();
 
 			return;
@@ -116,7 +188,14 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	const back = () => {
 		if (index.value > 0) index.value -= 1;
 	};
-	const skip = () => onClose();
+	// `reason` distinguishes the Skip button from Escape; the host's template
+	// passes a MouseEvent through @click, so only accept real strings.
+	const skip = (reason?: unknown) => {
+		emitEvent("tour_skipped", {
+			reason: typeof reason === "string" ? reason : "skip",
+		});
+		onClose();
+	};
 
 	// Tear down any per-step advance hooks (timer / click-to-advance).
 	const clearAdvance = () => {
@@ -147,6 +226,11 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		target,
 	});
 
+	const actionHooks = {
+		onError: (failedRef: { action: string }) =>
+			emitEvent("action_failed", { reason: failedRef.action }),
+	};
+
 	// Cancel any in-flight action run, then fire the finished step's onExit
 	// (cleanup) actions. Returns the fresh AbortController for the next run.
 	const rotateActions = () => {
@@ -162,6 +246,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
 					exitStep.onExit,
 					actions,
 					actionContextFor(exitStep, exitEl, abort.signal),
+					actionHooks,
 				)
 			: Promise.resolve();
 
@@ -181,7 +266,25 @@ export const useSpotlight = (options: SpotlightOptions) => {
 			current.onEnter,
 			actions,
 			actionContextFor(current, node, abort.signal),
+			actionHooks,
 		);
+	};
+
+	// The card's call-to-action ("Try it now"): run its action refs through
+	// the registry, then advance unless the step opts out.
+	const runCta = async () => {
+		const current = step.value;
+		const cta = current?.cta;
+		if (!current || !cta) return;
+		if (cta.actions?.length && actionAbort) {
+			await runTourActions(
+				cta.actions,
+				actions,
+				actionContextFor(current, currentEl, actionAbort.signal),
+				actionHooks,
+			);
+		}
+		if (cta.advance !== false) next();
 	};
 
 	const armAdvance = (node: Element | null) => {
@@ -198,6 +301,28 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		}
 	};
 
+	// Branch evaluation for the step at `stepIndex`: skipped when its mobile
+	// block says so, any skipIf holds, or any showIf fails.
+	const stepSkippedAt = (stepIndex: number) => {
+		const base = steps.value[stepIndex];
+		if (!base) return false;
+		if (isMobile.value && base.mobile?.skip) return true;
+		if (
+			base.skipIf?.some((condition) =>
+				evaluateTourCondition(condition, conditions),
+			)
+		) {
+			return true;
+		}
+
+		return Boolean(
+			base.showIf &&
+				!base.showIf.every((condition) =>
+					evaluateTourCondition(condition, conditions),
+				),
+		);
+	};
+
 	const locate = async () => {
 		locateToken += 1;
 		const token = locateToken;
@@ -209,6 +334,41 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		// UI the next step depends on) — unless a newer locate superseded us.
 		await exited;
 		if (token !== locateToken) return;
+
+		// Branching: hop over ineligible steps in the direction of travel.
+		// Scanning to the final index FIRST (then re-entering via the index
+		// watcher) keeps this loop-free.
+		if (stepSkippedAt(index.value)) {
+			const direction = index.value >= lastIndex ? 1 : -1;
+			let probe = index.value + direction;
+			while (
+				probe >= 0 &&
+				probe < steps.value.length &&
+				stepSkippedAt(probe)
+			) {
+				probe += direction;
+			}
+			// Going back into all-skipped territory: fall forward instead.
+			if (probe < 0) {
+				probe = index.value + 1;
+				while (probe < steps.value.length && stepSkippedAt(probe)) {
+					probe += 1;
+				}
+			}
+			if (probe >= steps.value.length) {
+				// Nothing left to show — the tour is over.
+				emitEvent("tour_completed", { reason: "remaining-skipped" });
+				onClose();
+
+				return;
+			}
+			lastIndex = index.value;
+			index.value = probe; // re-enters locate via the index watcher
+
+			return;
+		}
+		lastIndex = index.value;
+
 		const current = step.value;
 		if (!current) return;
 
@@ -216,9 +376,27 @@ export const useSpotlight = (options: SpotlightOptions) => {
 			await router.push(current.route);
 		}
 		if (token !== locateToken) return;
+
+		// Hold the step until the app is ready for it (a panel rendered, a
+		// host predicate true) — past the timeout, show it anyway.
+		if (current.waitFor) {
+			const timeout = current.waitFor.timeoutMs ?? TARGET_WAIT_MS;
+			if (current.waitFor.selector) {
+				await waitForEl(current.waitFor.selector, timeout);
+			} else if (current.waitFor.condition) {
+				await waitForTourCondition(
+					current.waitFor.condition,
+					conditions,
+					timeout,
+				);
+			}
+			if (token !== locateToken) return;
+		}
+
 		if (!current.target) {
 			armAdvance(null); // timer can still drive a centered step
 			enterActions(current, null, abort);
+			emitEvent("step_viewed");
 
 			return;
 		}
@@ -227,7 +405,9 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		if (token !== locateToken) return;
 		if (!node) {
 			// Missing target degrades to a centered card — its actions still run.
+			emitEvent("step_target_missing");
 			enterActions(current, null, abort);
+			emitEvent("step_viewed");
 
 			return;
 		}
@@ -242,11 +422,12 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		SETTLE_DELAYS_MS.forEach((delay) => setTimeout(remeasure, delay));
 		armAdvance(node);
 		enterActions(current, node, abort);
+		emitEvent("step_viewed");
 	};
 
 	const onKey = (event: KeyboardEvent) => {
 		if (!active.value) return;
-		if (event.key === "Escape") skip();
+		if (event.key === "Escape") skip("escape");
 		else if (event.key === "ArrowRight" || event.key === "Enter") next();
 		else if (event.key === "ArrowLeft") back();
 	};
@@ -388,6 +569,10 @@ export const useSpotlight = (options: SpotlightOptions) => {
 
 	watch(active, (isActive) => {
 		if (isActive) {
+			// Only a genuine start — cross-page resume mounts with active
+			// already true and never re-fires this watcher.
+			emitEvent("tour_started");
+			lastIndex = index.value;
 			void locate();
 		} else {
 			clearAdvance();
@@ -400,6 +585,11 @@ export const useSpotlight = (options: SpotlightOptions) => {
 
 	let trackTimer = 0;
 	onMounted(() => {
+		mobileMedia = window.matchMedia(
+			options.mobileQuery ?? DEFAULT_MOBILE_QUERY,
+		);
+		isMobile.value = mobileMedia.matches;
+		mobileMedia.addEventListener("change", onMobileMediaChange);
 		window.addEventListener("resize", measure);
 		window.addEventListener("scroll", measure, true);
 		window.addEventListener("keydown", onKey);
@@ -407,9 +597,13 @@ export const useSpotlight = (options: SpotlightOptions) => {
 			if (active.value && currentEl) measure();
 		}, TRACK_INTERVAL_MS);
 		// Resume after a cross-page reload — index/active restored from storage.
-		if (active.value) void locate();
+		if (active.value) {
+			lastIndex = index.value;
+			void locate();
+		}
 	});
 	onBeforeUnmount(() => {
+		mobileMedia?.removeEventListener("change", onMobileMediaChange);
 		window.removeEventListener("resize", measure);
 		window.removeEventListener("scroll", measure, true);
 		window.removeEventListener("keydown", onKey);
@@ -428,7 +622,9 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		isCentered,
 		isFirst,
 		isLast,
+		isMobile,
 		next,
+		runCta,
 		showBeacon,
 		skip,
 		spotlightStyle,

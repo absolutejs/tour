@@ -175,6 +175,114 @@ one side (`Tutorial.dataMode` carries the choice in the serialized tutorial).
 Badge the surface when `isDemo` is true so sample data is never mistaken for
 real.
 
+## Funnel events — see where viewers bail
+
+Pass `onEvent` to `useSpotlight` and every lifecycle moment lands in your
+analytics: `tour_started`, `step_viewed`, `step_completed`,
+`step_target_missing`, `action_failed`, `tour_completed`, and — the one that
+matters — `tour_skipped`, carrying the exact `stepIndex`, `stepTitle`,
+`target`, and `route` (the screen the viewer was on when they'd had enough)
+plus a `reason` distinguishing the Skip button from Escape.
+
+```ts
+useSpotlight({
+	steps, controller, onClose,
+	tutorialSlug: () => activeTutorial.value?.slug,
+	onEvent: (event) => analytics.track(event),
+});
+```
+
+## Branching & readiness — showIf / skipIf / waitFor
+
+Conditions mirror actions: serializable refs resolved by name against a
+registry (`useTourConditions`), with `element` and `media` built in.
+
+```ts
+useTourConditions().register("hasDeals", () => dealCount.value > 0);
+```
+
+```ts
+{
+	title: "Your pipeline",
+	showIf: [{ condition: "hasDeals" }],           // all must hold, else skipped
+	skipIf: [{ condition: "media", args: { query: "(max-width: 640px)" } }],
+	waitFor: { selector: ".pipeline-board", timeoutMs: 5000 }, // hold until ready
+}
+```
+
+Skipped steps are hopped in the direction of travel; if everything ahead is
+skipped the tour completes cleanly.
+
+## Mobile variants
+
+Below `mobileQuery` (default `(max-width: 640px)`) a step's `mobile` block
+overrides its target/placement/copy — or skips it where the anchor doesn't
+exist on small screens:
+
+```ts
+{ target: '[data-tour="toolbar-btn"]', mobile: { target: '[data-tour="menu"]', placement: "top" } }
+{ target: '[data-tour="desktop-panel"]', mobile: { skip: true } }
+```
+
+## CTA buttons
+
+`cta: { label: "Try it now", actions: [{ action: "click" }] }` renders a
+button in the card (host template: `v-if="step.cta"` → `@click="runCta"`);
+it runs the refs through the action registry and advances unless
+`advance: false`.
+
+## Auto-play gate — stop nagging people
+
+`useTourGate` owns the auto-play decision across MANY tutorials: dismissal
+caps (`trigger.maxDismissals`, default 2 — after that, manual replay only),
+`oncePerSession`, `priority` when several tutorials match a page, audience
+`showIf` predicates, and role matching. State persists in localStorage.
+
+```ts
+const gate = useTourGate({ roles: () => viewer.roles });
+const tutorial = gate.pick(publishedTutorials, route.path);
+if (tutorial) {
+	gate.recordAutoPlay(tutorial.slug ?? "");
+	controller.start();
+}
+// from your onEvent sink:
+//   tour_skipped   → gate.recordDismissal(slug)
+//   tour_completed → gate.recordCompletion(slug)
+```
+
+## Checklist — "getting started" engine
+
+Typed tasks + completion persistence + progress math; the host renders the
+panel. `completeForTutorial(slug)` checks off tasks tied to a tutorial (wire
+it to the `tour_completed` event).
+
+```ts
+const checklist = useTourChecklist({
+	id: "onboarding",
+	items: () => [
+		{ id: "intake", title: "Finish your intake", href: "/portal/intake" },
+		{ id: "tour", title: "Take the tour", tutorialSlug: "portal-intro" },
+	],
+});
+// checklist.items → [{...item, done}], checklist.progress → {done,total,percent}
+```
+
+## Hotspots — always-on help beacons
+
+Persistent pulsing beacons on tricky UI (independent of any tour) that open
+an explainer card on click. `once: true` hides a beacon after it's been
+opened; dismissals persist.
+
+```ts
+const spots = useTourHotspots({
+	hotspots: () => [
+		{ id: "trust-fit", target: '[data-tour="trust-fit"]', title: "Trust & Fit", body: "…" },
+	],
+	enabled: () => !tourController.active.value,
+});
+// render spots.beacons (beacon per target) and spots.card (open card) yourself
+```
+
 ## License
 
 Business Source License 1.1 — see [LICENSE](./LICENSE). Converts to Apache 2.0
