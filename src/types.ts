@@ -36,6 +36,31 @@ export type TourSpotlight = {
 	allowInteraction?: boolean;
 };
 
+/** Arguments carried by a serialized action reference — plain JSON scalars so
+ *  the whole tutorial stays storable/authorable. */
+export type TourActionArgValue = string | number | boolean | null;
+
+export type TourActionArgs = Record<string, TourActionArgValue>;
+
+/**
+ * A serializable reference to an action the engine runs when a step is entered
+ * or left. `action` names either a built-in ("click" | "wait" | "scroll") or a
+ * handler the host app registered on its TourActionRegistry — this is how a
+ * tour DEMONSTRATES the product (e.g. auto-swiping a card) instead of just
+ * pointing at it.
+ */
+export type TourActionRef = {
+	action: string;
+	args?: TourActionArgs;
+	/** Wait this long (ms) before running this action. */
+	delayMs?: number;
+};
+
+/** How a tutorial resolves data-backed surfaces while it plays: "auto" shows
+ *  the viewer's real data when they have it and the host's typed demo data
+ *  when they don't; "demo" / "live" force one side. */
+export type TourDataMode = "auto" | "demo" | "live";
+
 export type TourTransitionKind = "fade" | "slide" | "scale" | "none";
 
 export type TourTransition = {
@@ -72,6 +97,11 @@ export type TourStep = {
 	transition?: TourTransition;
 	/** Show a pulsing hint dot on the target instead of a heavy spotlight. */
 	beacon?: boolean;
+	/** Actions to run once the step is positioned (demos, clicks, waits). They
+	 *  run sequentially and are cancelled if the step changes mid-run. */
+	onEnter?: TourActionRef[];
+	/** Actions to run when leaving the step (cleanup / restore). */
+	onExit?: TourActionRef[];
 };
 
 export type TourTrigger = {
@@ -105,5 +135,8 @@ export type Tutorial = {
 	trigger?: TourTrigger;
 	/** Per-tutorial theming. */
 	theme?: TourTheme;
+	/** How data-backed surfaces resolve while this tutorial plays (see
+	 *  TourDataMode / useTourDemo). Default "auto". */
+	dataMode?: TourDataMode;
 	steps: TourStep[];
 };

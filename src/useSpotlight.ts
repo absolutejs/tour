@@ -9,6 +9,11 @@ import {
 import { useRoute, useRouter } from "vue-router";
 import type { TourStep, TourTheme } from "./types";
 import type { TourController } from "./controller";
+import {
+	runTourActions,
+	useTourActions,
+	type TourActionRegistry,
+} from "./actions";
 
 const TOOLTIP_WIDTH = 340;
 const GAP = 14;
@@ -37,6 +42,9 @@ export type SpotlightOptions = {
 	onClose: () => void;
 	/** Optional per-tutorial theme → exposed as CSS custom properties. */
 	theme?: () => TourTheme | undefined;
+	/** Registry that resolves the steps' onEnter/onExit action names. Defaults
+	 *  to the shared useTourActions() registry. */
+	actions?: TourActionRegistry;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -70,11 +78,19 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	const router = useRouter();
 	const route = useRoute();
 
+	const actions = options.actions ?? useTourActions();
+
 	const targetRect = ref<DOMRect | null>(null);
 	let currentEl: Element | null = null;
 	let locateToken = 0;
 	let advanceTimer = 0;
 	let clickAdvanceEl: Element | null = null;
+	// The step whose onEnter actions ran (and its element), so its onExit can
+	// run before the next step takes over — and the AbortController that cancels
+	// an in-flight action sequence when the step changes under it.
+	let actionAbort: AbortController | null = null;
+	let actionStep: TourStep | null = null;
+	let actionEl: Element | null = null;
 
 	const steps = computed(() => options.steps());
 	const step = computed(() => steps.value[index.value] ?? null);
@@ -117,6 +133,57 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		next();
 	}
 
+	const actionContextFor = (
+		current: TourStep,
+		target: Element | null,
+		signal: AbortSignal,
+	) => ({
+		back,
+		index: index.value,
+		next,
+		signal,
+		step: current,
+		stop: skip,
+		target,
+	});
+
+	// Cancel any in-flight action run, then fire the finished step's onExit
+	// (cleanup) actions. Returns the fresh AbortController for the next run.
+	const rotateActions = () => {
+		actionAbort?.abort();
+		const abort = new AbortController();
+		actionAbort = abort;
+		const exitStep = actionStep;
+		const exitEl = actionEl;
+		actionStep = null;
+		actionEl = null;
+		const exited = exitStep?.onExit
+			? runTourActions(
+					exitStep.onExit,
+					actions,
+					actionContextFor(exitStep, exitEl, abort.signal),
+				)
+			: Promise.resolve();
+
+		return { abort, exited };
+	};
+
+	const enterActions = (
+		current: TourStep,
+		node: Element | null,
+		abort: AbortController,
+	) => {
+		actionStep = current;
+		actionEl = node;
+		if (!current.onEnter) return;
+		// Fire-and-forget so the card shows while the demo plays.
+		void runTourActions(
+			current.onEnter,
+			actions,
+			actionContextFor(current, node, abort.signal),
+		);
+	};
+
 	const armAdvance = (node: Element | null) => {
 		const advance = step.value?.advance;
 		if (!advance || !advance.on || advance.on === "button") return;
@@ -135,8 +202,13 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		locateToken += 1;
 		const token = locateToken;
 		clearAdvance();
+		const { abort, exited } = rotateActions();
 		currentEl = null;
 		targetRect.value = null;
+		// Let the previous step's cleanup finish before moving (it may restore
+		// UI the next step depends on) — unless a newer locate superseded us.
+		await exited;
+		if (token !== locateToken) return;
 		const current = step.value;
 		if (!current) return;
 
@@ -146,12 +218,19 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		if (token !== locateToken) return;
 		if (!current.target) {
 			armAdvance(null); // timer can still drive a centered step
+			enterActions(current, null, abort);
 
 			return;
 		}
 
 		const node = await waitForEl(current.target, TARGET_WAIT_MS);
-		if (token !== locateToken || !node) return;
+		if (token !== locateToken) return;
+		if (!node) {
+			// Missing target degrades to a centered card — its actions still run.
+			enterActions(current, null, abort);
+
+			return;
+		}
 
 		currentEl = node;
 		node.scrollIntoView({ block: "center", inline: "nearest" });
@@ -162,6 +241,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		requestAnimationFrame(remeasure);
 		SETTLE_DELAYS_MS.forEach((delay) => setTimeout(remeasure, delay));
 		armAdvance(node);
+		enterActions(current, node, abort);
 	};
 
 	const onKey = (event: KeyboardEvent) => {
@@ -307,8 +387,14 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	});
 
 	watch(active, (isActive) => {
-		if (isActive) void locate();
-		else clearAdvance();
+		if (isActive) {
+			void locate();
+		} else {
+			clearAdvance();
+			// Closing the tour still runs the last step's cleanup actions.
+			const { exited } = rotateActions();
+			void exited;
+		}
 	});
 	watch(index, () => void locate());
 
@@ -329,6 +415,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		window.removeEventListener("keydown", onKey);
 		clearInterval(trackTimer);
 		clearAdvance();
+		actionAbort?.abort();
 	});
 
 	return {

@@ -108,6 +108,73 @@ The host app owns: the `data-tour` anchors, the step content, and where the
 "seen" marker is stored (so finishing a first-visit run stamps it; a replay
 does not).
 
+## Step actions — demo the product, don't just point at it
+
+Steps stay serializable, so a step references actions **by name**; the host
+registers the handlers. `onEnter` actions run once the step is positioned
+(sequentially, cancelled if the step changes mid-run); `onExit` actions run
+when the step is left — cleanup/restore.
+
+```ts
+// The page that OWNS the surface registers its demo handler (setup):
+import { useTourActions } from "@absolutejs/tour";
+
+const actions = useTourActions();
+const unregister = actions.register("matches.demo-swipe", async (ctx) => {
+	const direction = ctx.args.direction === "left" ? "left" : "right";
+	await swiper.value?.demoSwipe(direction); // ctx.signal aborts long demos
+});
+onBeforeUnmount(unregister);
+```
+
+```ts
+// The step invokes it — plain JSON, safe to store in a DB / author in an admin UI:
+{
+	title: "Swipe or list",
+	route: "/portal/matches",
+	target: '[data-tour="match-view"]',
+	onEnter: [
+		{ action: "matches.demo-swipe", args: { direction: "right" } },
+		{ action: "wait", args: { ms: 700 } },
+		{ action: "matches.demo-swipe", args: { direction: "left" } },
+	],
+}
+```
+
+Built-ins (no host code needed): `click`, `scroll`, `wait` — each takes an
+optional `selector` (default: the step's target). Unknown action names warn
+and skip so a tutorial authored against an unmounted page degrades instead of
+breaking the tour. Handlers receive `{ step, target, args, index, signal,
+next, back, stop }` — a handler can drive the tour itself (e.g. auto-advance
+when its demo finishes).
+
+## Demo data — tour an empty account for free
+
+A tour must be able to show a data-backed surface (matches, pipeline) to a
+viewer who has no data yet — a fresh signup, an unsubscribed user — without
+the host paying to source anything. `useTourDemo` swaps in a constant,
+**fully-typed** sample dataset while the tour plays and passes the real data
+through untouched otherwise:
+
+```ts
+import { useTourDemo, useTourController } from "@absolutejs/tour";
+
+const controller = useTourController("myapp.tour");
+const { data: matches, isDemo } = useTourDemo({
+	controller,
+	demo: DEMO_MATCHES, // typed PartnerMatch[] — same shape the surface renders
+	live: () => realMatches.value,
+	mode: () => tutorial.value?.dataMode, // optional per-tutorial override
+});
+```
+
+Resolution is per `TourDataMode`: `"auto"` (default) shows the viewer's real
+data when they have it — so a member with sourced matches is toured on **their
+literal matches** — and the sample when they don't; `"demo"` / `"live"` force
+one side (`Tutorial.dataMode` carries the choice in the serialized tutorial).
+Badge the surface when `isDemo` is true so sample data is never mistaken for
+real.
+
 ## License
 
 Business Source License 1.1 — see [LICENSE](./LICENSE). Converts to Apache 2.0
