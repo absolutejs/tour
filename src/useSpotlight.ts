@@ -324,6 +324,10 @@ export const useSpotlight = (options: SpotlightOptions) => {
 	};
 
 	const locate = async () => {
+		// stop() resets the index to 0, which re-fires the index watcher — a
+		// dead tour must never locate (it would follow step 0's route and
+		// NAVIGATE the user away right after they closed it).
+		if (!active.value) return;
 		locateToken += 1;
 		const token = locateToken;
 		clearAdvance();
