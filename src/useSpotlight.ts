@@ -23,6 +23,9 @@ import {
 import type { TourEventName, TourEventSink } from "./events";
 
 const TOOLTIP_WIDTH = 340;
+// Pre-measure estimate only — the card is measured once rendered and every
+// position derives from its REAL size, so it can never be pushed off-screen.
+const ESTIMATED_TOOLTIP_HEIGHT = 240;
 const GAP = 14;
 const DEFAULT_PAD = 6;
 const DEFAULT_RADIUS = 12;
@@ -34,8 +37,6 @@ const SETTLE_DELAYS_MS = [120, 300, 600];
 // And on this light interval while active, to follow LATE reflows (a page
 // loading its data and resizing its header after we measured).
 const TRACK_INTERVAL_MS = 150;
-const FLIP_RESERVE = 220;
-const MAX_TOOLTIP_TOP = 160;
 const DEFAULT_DIM = 0.62;
 const DEFAULT_TIMER_MS = 6000;
 const DEFAULT_TRANSITION_MS = 260;
@@ -64,19 +65,31 @@ export type SpotlightOptions = {
 	tutorialSlug?: () => string | undefined;
 	/** Media query below which steps' `mobile` overrides apply. */
 	mobileQuery?: string;
+	/** Hold positioning until the host has resolved WHICH steps to play (e.g.
+	 *  an async tutorial fetch on a cross-page resume). Until this returns true
+	 *  the engine won't locate/navigate; it re-locates when it flips true. */
+	ready?: () => boolean;
 };
 
 const clamp = (value: number, min: number, max: number) =>
 	Math.min(Math.max(value, min), max);
 
-// Poll for the target — after a route change the page may still be rendering,
-// so retry up to `timeout` ms before giving up (→ centered card).
+// An element that exists but has no box (display:none, collapsed drawer) must
+// not be spotlighted — it would pin the ring AND the card to a 0×0 point.
+const hasBox = (el: Element) => {
+	const rect = el.getBoundingClientRect();
+
+	return rect.width > 0 && rect.height > 0;
+};
+
+// Poll for a VISIBLE target — after a route change the page may still be
+// rendering, so retry up to `timeout` ms before giving up (→ centered card).
 const waitForEl = (selector: string, timeout: number) =>
 	new Promise<Element | null>((resolve) => {
 		const deadline = Date.now() + timeout;
 		const tick = () => {
 			const found = document.querySelector(selector);
-			if (found) {
+			if (found && hasBox(found)) {
 				resolve(found);
 
 				return;
@@ -146,8 +159,29 @@ export const useSpotlight = (options: SpotlightOptions) => {
 
 	const pad = computed(() => step.value?.spotlight?.padding ?? DEFAULT_PAD);
 
+	// The rendered card, bound by the host (ref="tooltipEl") so positioning can
+	// clamp against its REAL size instead of a guess.
+	const tooltipEl = ref<HTMLElement | null>(null);
+	const tooltipSize = ref({
+		height: ESTIMATED_TOOLTIP_HEIGHT,
+		width: TOOLTIP_WIDTH,
+	});
+	const measureTooltip = () => {
+		const el = tooltipEl.value;
+		if (!el) return;
+		const { offsetHeight, offsetWidth } = el;
+		if (offsetHeight > 0 && offsetWidth > 0) {
+			tooltipSize.value = { height: offsetHeight, width: offsetWidth };
+		}
+	};
+
 	const measure = () => {
-		if (currentEl) targetRect.value = currentEl.getBoundingClientRect();
+		measureTooltip();
+		if (!currentEl) return;
+		const rect = currentEl.getBoundingClientRect();
+		// Target collapsed/hidden mid-step (closed drawer, switched tab pane):
+		// fall back to the centered card rather than a 0×0 spotlight.
+		targetRect.value = rect.width > 0 && rect.height > 0 ? rect : null;
 	};
 
 	// Funnel events. The step/route on a tour_skipped is THE datapoint: the
@@ -328,6 +362,18 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		// dead tour must never locate (it would follow step 0's route and
 		// NAVIGATE the user away right after they closed it).
 		if (!active.value) return;
+		// Cross-page resume: don't position (or navigate!) against a stand-in
+		// step list while the host is still fetching the real tutorial.
+		if (options.ready && !options.ready()) return;
+		// A persisted run can outlive its tutorial (steps edited/shortened
+		// between sessions). Clamp to the final step instead of going
+		// invisible-but-active — the "trapped in a tour" failure where the
+		// overlay state is stuck on with no card left to escape from.
+		if (steps.value.length > 0 && index.value >= steps.value.length) {
+			index.value = steps.value.length - 1; // re-enters via the watcher
+
+			return;
+		}
 		locateToken += 1;
 		const token = locateToken;
 		clearAdvance();
@@ -506,44 +552,65 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		return { left: `${rect.right - 6}px`, top: `${rect.top - 6}px` };
 	});
 
+	// Position from the card's MEASURED size: flip to the roomier side when the
+	// preferred one can't fit it, then clamp both axes so the card (and its
+	// Skip/Next controls) can never leave the viewport — an off-screen card is
+	// a blocked page with no visible way out.
 	const tooltipStyle = computed(() => {
 		const rect = targetRect.value;
 		if (!rect) return {};
 
+		const { height: cardH, width: cardW } = tooltipSize.value;
 		const viewW = window.innerWidth;
 		const viewH = window.innerHeight;
+		const clampLeft = (value: number) =>
+			clamp(
+				value,
+				VIEWPORT_MARGIN,
+				Math.max(VIEWPORT_MARGIN, viewW - cardW - VIEWPORT_MARGIN),
+			);
+		const clampTop = (value: number) =>
+			clamp(
+				value,
+				VIEWPORT_MARGIN,
+				Math.max(VIEWPORT_MARGIN, viewH - cardH - VIEWPORT_MARGIN),
+			);
+		const fitsAbove = rect.top - GAP - cardH >= VIEWPORT_MARGIN;
+		const fitsBelow = rect.bottom + GAP + cardH <= viewH - VIEWPORT_MARGIN;
+		const fitsLeft = rect.left - GAP - cardW >= VIEWPORT_MARGIN;
+		const fitsRight = rect.right + GAP + cardW <= viewW - VIEWPORT_MARGIN;
+
 		let placement = step.value?.placement ?? "bottom";
-		if (placement === "bottom" && rect.bottom + FLIP_RESERVE > viewH) {
-			placement = "top";
+		if (placement === "bottom" && !fitsBelow && fitsAbove) placement = "top";
+		else if (placement === "top" && !fitsAbove && fitsBelow) {
+			placement = "bottom";
+		} else if (placement === "right" && !fitsRight && fitsLeft) {
+			placement = "left";
+		} else if (placement === "left" && !fitsLeft && fitsRight) {
+			placement = "right";
 		}
 
 		if (placement === "right") {
 			return {
-				left: `${rect.right + GAP}px`,
-				top: `${clamp(rect.top, VIEWPORT_MARGIN, viewH - MAX_TOOLTIP_TOP)}px`,
+				left: `${clampLeft(rect.right + GAP)}px`,
+				top: `${clampTop(rect.top)}px`,
 			};
 		}
 		if (placement === "left") {
 			return {
-				left: `${rect.left - GAP}px`,
-				top: `${clamp(rect.top, VIEWPORT_MARGIN, viewH - MAX_TOOLTIP_TOP)}px`,
-				transform: "translateX(-100%)",
+				left: `${clampLeft(rect.left - GAP - cardW)}px`,
+				top: `${clampTop(rect.top)}px`,
 			};
 		}
-		const left = clamp(
-			rect.left + rect.width / 2 - TOOLTIP_WIDTH / 2,
-			VIEWPORT_MARGIN,
-			viewW - TOOLTIP_WIDTH - VIEWPORT_MARGIN,
-		);
+		const left = clampLeft(rect.left + rect.width / 2 - cardW / 2);
 		if (placement === "top") {
 			return {
 				left: `${left}px`,
-				top: `${rect.top - GAP}px`,
-				transform: "translateY(-100%)",
+				top: `${clampTop(rect.top - GAP - cardH)}px`,
 			};
 		}
 
-		return { left: `${left}px`, top: `${rect.bottom + GAP}px` };
+		return { left: `${left}px`, top: `${clampTop(rect.bottom + GAP)}px` };
 	});
 
 	// Entrance animation for the card — re-keyed per step so it replays.
@@ -586,6 +653,16 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		}
 	});
 	watch(index, () => void locate());
+	// The host can swap the step LIST under a running tour (async tutorial
+	// fetch on a cross-page resume) — re-position against the real steps.
+	watch(steps, () => {
+		if (active.value) void locate();
+	});
+	if (options.ready) {
+		watch(options.ready, (isReady) => {
+			if (isReady && active.value) void locate();
+		});
+	}
 
 	let trackTimer = 0;
 	onMounted(() => {
@@ -635,6 +712,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
 		step,
 		stepCount,
 		themeVars,
+		tooltipEl,
 		tooltipStyle,
 	};
 };
