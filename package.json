@@ -23,7 +23,7 @@
 		"LICENSE"
 	],
 	"scripts": {
-		"build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --external vue --external vue-router && tsc --emitDeclarationOnly --project tsconfig.json",
+		"build": "rm -rf dist && bun build src/index.ts src/manifest.ts --outdir dist --root ./src --sourcemap --external vue --external vue-router && tsc --emitDeclarationOnly --project tsconfig.json && absolute-manifest emit",
 		"typecheck": "tsc --noEmit"
 	},
 	"types": "./dist/index.d.ts",
@@ -36,5 +36,25 @@
 		"typescript": "^6.0.3",
 		"vue": "^3.5.38",
 		"vue-router": "^4.4.0"
+	},
+	"absolutejs": {
+		"manifestContract": 1
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		},
+		"./manifest": {
+			"types": "./dist/manifest.d.ts",
+			"import": "./dist/manifest.js",
+			"default": "./dist/manifest.js"
+		},
+		"./manifest.json": "./dist/manifest.json"
+	},
+	"dependencies": {
+		"@absolutejs/manifest": "^0.1.0",
+		"@sinclair/typebox": "^0.34.0"
 	}
 }
