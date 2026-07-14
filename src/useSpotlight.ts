@@ -196,6 +196,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
 			at: new Date().toISOString(),
 			isReplay: controller.isReplay.value,
 			name,
+			runId: controller.runId.value,
 			reason: extra?.reason,
 			route:
 				typeof window === "undefined"

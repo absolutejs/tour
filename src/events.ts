@@ -18,6 +18,8 @@ export type TourEvent = {
 	at: string;
 	isReplay: boolean;
 	name: TourEventName;
+	/** Stable identity for one tour attempt, preserved across page changes. */
+	runId: string;
 	/** For tour_skipped: how ("skip" button vs "escape"). For action_failed:
 	 *  the action name. For tour_completed: "remaining-skipped" when the tail
 	 *  of the tour was branch-skipped. */
