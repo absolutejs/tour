@@ -1,24 +1,24 @@
 import {
-	computed,
-	nextTick,
-	onBeforeUnmount,
-	onMounted,
-	ref,
-	watch,
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import type { TourStep, TourTheme } from "./types";
 import type { TourController } from "./controller";
 import {
-	runTourActions,
-	useTourActions,
-	type TourActionRegistry,
+  runTourActions,
+  useTourActions,
+  type TourActionRegistry,
 } from "./actions";
 import {
-	evaluateTourCondition,
-	useTourConditions,
-	waitForTourCondition,
-	type TourConditionRegistry,
+  evaluateTourCondition,
+  useTourConditions,
+  waitForTourCondition,
+  type TourConditionRegistry,
 } from "./conditions";
 import type { TourEventName, TourEventSink } from "./events";
 
@@ -43,677 +43,673 @@ const DEFAULT_TRANSITION_MS = 260;
 const DEFAULT_MOBILE_QUERY = "(max-width: 640px)";
 
 export type SpotlightOptions = {
-	/** The ordered steps to walk. A getter so it can be reactive/swappable. */
-	steps: () => TourStep[];
-	/** Shared active/index state (see useTourController). */
-	controller: TourController;
-	/** Called when the user finishes the last step or skips. */
-	onClose: () => void;
-	/** Optional per-tutorial theme → exposed as CSS custom properties. */
-	theme?: () => TourTheme | undefined;
-	/** Registry that resolves the steps' onEnter/onExit action names. Defaults
-	 *  to the shared useTourActions() registry. */
-	actions?: TourActionRegistry;
-	/** Registry that resolves showIf/skipIf/waitFor condition names. Defaults
-	 *  to the shared useTourConditions() registry. */
-	conditions?: TourConditionRegistry;
-	/** Funnel-event sink (started / viewed / completed / skipped / target
-	 *  missing / action failed). tour_skipped carries the exact step + route
-	 *  the viewer bailed on. */
-	onEvent?: TourEventSink;
-	/** The identity of the tutorial being played, stamped on every event. */
-	tutorialSlug?: () => string | undefined;
-	/** Media query below which steps' `mobile` overrides apply. */
-	mobileQuery?: string;
-	/** Hold positioning until the host has resolved WHICH steps to play (e.g.
-	 *  an async tutorial fetch on a cross-page resume). Until this returns true
-	 *  the engine won't locate/navigate; it re-locates when it flips true. */
-	ready?: () => boolean;
+  /** The ordered steps to walk. A getter so it can be reactive/swappable. */
+  steps: () => TourStep[];
+  /** Shared active/index state (see useTourController). */
+  controller: TourController;
+  /** Called when the user finishes the last step or skips. */
+  onClose: () => void;
+  /** Optional per-tutorial theme → exposed as CSS custom properties. */
+  theme?: () => TourTheme | undefined;
+  /** Registry that resolves the steps' onEnter/onExit action names. Defaults
+   *  to the shared useTourActions() registry. */
+  actions?: TourActionRegistry;
+  /** Registry that resolves showIf/skipIf/waitFor condition names. Defaults
+   *  to the shared useTourConditions() registry. */
+  conditions?: TourConditionRegistry;
+  /** Funnel-event sink (started / viewed / completed / skipped / target
+   *  missing / action failed). tour_skipped carries the exact step + route
+   *  the viewer bailed on. */
+  onEvent?: TourEventSink;
+  /** The identity of the tutorial being played, stamped on every event. */
+  tutorialSlug?: () => string | undefined;
+  /** Media query below which steps' `mobile` overrides apply. */
+  mobileQuery?: string;
+  /** Hold positioning until the host has resolved WHICH steps to play (e.g.
+   *  an async tutorial fetch on a cross-page resume). Until this returns true
+   *  the engine won't locate/navigate; it re-locates when it flips true. */
+  ready?: () => boolean;
 };
 
 const clamp = (value: number, min: number, max: number) =>
-	Math.min(Math.max(value, min), max);
+  Math.min(Math.max(value, min), max);
 
 // An element that exists but has no box (display:none, collapsed drawer) must
 // not be spotlighted — it would pin the ring AND the card to a 0×0 point.
 const hasBox = (el: Element) => {
-	const rect = el.getBoundingClientRect();
+  const rect = el.getBoundingClientRect();
 
-	return rect.width > 0 && rect.height > 0;
+  return rect.width > 0 && rect.height > 0;
 };
 
 // Poll for a VISIBLE target — after a route change the page may still be
 // rendering, so retry up to `timeout` ms before giving up (→ centered card).
 const waitForEl = (selector: string, timeout: number) =>
-	new Promise<Element | null>((resolve) => {
-		const deadline = Date.now() + timeout;
-		const tick = () => {
-			const found = document.querySelector(selector);
-			if (found && hasBox(found)) {
-				resolve(found);
+  new Promise<Element | null>((resolve) => {
+    const deadline = Date.now() + timeout;
+    const tick = () => {
+      const found = document.querySelector(selector);
+      if (found && hasBox(found)) {
+        resolve(found);
 
-				return;
-			}
-			if (Date.now() > deadline) {
-				resolve(null);
+        return;
+      }
+      if (Date.now() > deadline) {
+        resolve(null);
 
-				return;
-			}
-			requestAnimationFrame(tick);
-		};
-		tick();
-	});
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    tick();
+  });
 
 export const useSpotlight = (options: SpotlightOptions) => {
-	const { controller, onClose } = options;
-	const { active, index } = controller;
-	const router = useRouter();
-	const route = useRoute();
+  const { controller, onClose } = options;
+  const { active, index } = controller;
+  const router = useRouter();
+  const route = useRoute();
 
-	const actions = options.actions ?? useTourActions();
-	const conditions = options.conditions ?? useTourConditions();
+  const actions = options.actions ?? useTourActions();
+  const conditions = options.conditions ?? useTourConditions();
 
-	const targetRect = ref<DOMRect | null>(null);
-	let currentEl: Element | null = null;
-	let locateToken = 0;
-	let advanceTimer = 0;
-	let clickAdvanceEl: Element | null = null;
-	// Direction of travel (next vs back) so branch-skipped steps are hopped
-	// over the way the viewer is moving.
-	let lastIndex = 0;
-	// The step whose onEnter actions ran (and its element), so its onExit can
-	// run before the next step takes over — and the AbortController that cancels
-	// an in-flight action sequence when the step changes under it.
-	let actionAbort: AbortController | null = null;
-	let actionStep: TourStep | null = null;
-	let actionEl: Element | null = null;
+  const targetRect = ref<DOMRect | null>(null);
+  let currentEl: Element | null = null;
+  let locateToken = 0;
+  let advanceTimer = 0;
+  let clickAdvanceEl: Element | null = null;
+  // Direction of travel (next vs back) so branch-skipped steps are hopped
+  // over the way the viewer is moving.
+  let lastIndex = 0;
+  // The step whose onEnter actions ran (and its element), so its onExit can
+  // run before the next step takes over — and the AbortController that cancels
+  // an in-flight action sequence when the step changes under it.
+  let actionAbort: AbortController | null = null;
+  let actionStep: TourStep | null = null;
+  let actionEl: Element | null = null;
 
-	// Small-screen overrides: below `mobileQuery` a step's `mobile` block wins
-	// (target/placement/copy), so the resolved step is what everything —
-	// positioning, rendering, events — sees.
-	const isMobile = ref(false);
-	let mobileMedia: MediaQueryList | null = null;
-	const onMobileMediaChange = () => {
-		isMobile.value = mobileMedia?.matches ?? false;
-	};
-	const resolveStep = (base: TourStep | null | undefined): TourStep | null => {
-		if (!base) return null;
-		if (!base.mobile || !isMobile.value) return base;
-		const mobile = base.mobile;
+  // Small-screen overrides: below `mobileQuery` a step's `mobile` block wins
+  // (target/placement/copy), so the resolved step is what everything —
+  // positioning, rendering, events — sees.
+  const isMobile = ref(false);
+  let mobileMedia: MediaQueryList | null = null;
+  const onMobileMediaChange = () => {
+    isMobile.value = mobileMedia?.matches ?? false;
+  };
+  const resolveStep = (base: TourStep | null | undefined): TourStep | null => {
+    if (!base) return null;
+    if (!base.mobile || !isMobile.value) return base;
+    const mobile = base.mobile;
 
-		return {
-			...base,
-			...(mobile.target !== undefined ? { target: mobile.target } : {}),
-			...(mobile.placement ? { placement: mobile.placement } : {}),
-			...(mobile.title ? { title: mobile.title } : {}),
-			...(mobile.body ? { body: mobile.body } : {}),
-		};
-	};
+    return {
+      ...base,
+      ...(mobile.target !== undefined ? { target: mobile.target } : {}),
+      ...(mobile.placement ? { placement: mobile.placement } : {}),
+      ...(mobile.title ? { title: mobile.title } : {}),
+      ...(mobile.body ? { body: mobile.body } : {}),
+    };
+  };
 
-	const steps = computed(() => options.steps());
-	const step = computed(() => resolveStep(steps.value[index.value]));
-	const stepCount = computed(() => steps.value.length);
-	const isLast = computed(() => index.value === steps.value.length - 1);
-	const isFirst = computed(() => index.value === 0);
-	const isCentered = computed(() => !targetRect.value);
+  const steps = computed(() => options.steps());
+  const step = computed(() => resolveStep(steps.value[index.value]));
+  const stepCount = computed(() => steps.value.length);
+  const isLast = computed(() => index.value === steps.value.length - 1);
+  const isFirst = computed(() => index.value === 0);
+  const isCentered = computed(() => !targetRect.value);
 
-	const pad = computed(() => step.value?.spotlight?.padding ?? DEFAULT_PAD);
+  const pad = computed(() => step.value?.spotlight?.padding ?? DEFAULT_PAD);
 
-	// The rendered card, bound by the host (ref="tooltipEl") so positioning can
-	// clamp against its REAL size instead of a guess.
-	const tooltipEl = ref<HTMLElement | null>(null);
-	const tooltipSize = ref({
-		height: ESTIMATED_TOOLTIP_HEIGHT,
-		width: TOOLTIP_WIDTH,
-	});
-	const measureTooltip = () => {
-		const el = tooltipEl.value;
-		if (!el) return;
-		const { offsetHeight, offsetWidth } = el;
-		if (offsetHeight > 0 && offsetWidth > 0) {
-			tooltipSize.value = { height: offsetHeight, width: offsetWidth };
-		}
-	};
+  // The rendered card, bound by the host (ref="tooltipEl") so positioning can
+  // clamp against its REAL size instead of a guess.
+  const tooltipEl = ref<HTMLElement | null>(null);
+  const tooltipSize = ref({
+    height: ESTIMATED_TOOLTIP_HEIGHT,
+    width: TOOLTIP_WIDTH,
+  });
+  const measureTooltip = () => {
+    const el = tooltipEl.value;
+    if (!el) return;
+    const { offsetHeight, offsetWidth } = el;
+    if (offsetHeight > 0 && offsetWidth > 0) {
+      tooltipSize.value = { height: offsetHeight, width: offsetWidth };
+    }
+  };
 
-	const measure = () => {
-		measureTooltip();
-		if (!currentEl) return;
-		const rect = currentEl.getBoundingClientRect();
-		// Target collapsed/hidden mid-step (closed drawer, switched tab pane):
-		// fall back to the centered card rather than a 0×0 spotlight.
-		targetRect.value = rect.width > 0 && rect.height > 0 ? rect : null;
-	};
+  const measure = () => {
+    measureTooltip();
+    if (!currentEl) return;
+    const rect = currentEl.getBoundingClientRect();
+    // Target collapsed/hidden mid-step (closed drawer, switched tab pane):
+    // fall back to the centered card rather than a 0×0 spotlight.
+    targetRect.value = rect.width > 0 && rect.height > 0 ? rect : null;
+  };
 
-	// Funnel events. The step/route on a tour_skipped is THE datapoint: the
-	// exact screen where the viewer had enough.
-	const emitEvent = (
-		name: TourEventName,
-		extra?: { reason?: string; step?: TourStep | null },
-	) => {
-		if (!options.onEvent) return;
-		const eventStep = extra && "step" in extra ? extra.step : step.value;
-		options.onEvent({
-			at: new Date().toISOString(),
-			isReplay: controller.isReplay.value,
-			name,
-			runId: controller.runId.value,
-			reason: extra?.reason,
-			route:
-				typeof window === "undefined"
-					? undefined
-					: window.location.pathname,
-			stepCount: stepCount.value,
-			stepIndex: index.value,
-			stepTitle: eventStep?.title,
-			target: eventStep?.target,
-			tutorialSlug: options.tutorialSlug?.(),
-		});
-	};
+  // Funnel events. The step/route on a tour_skipped is THE datapoint: the
+  // exact screen where the viewer had enough.
+  const emitEvent = (
+    name: TourEventName,
+    extra?: { reason?: string; step?: TourStep | null },
+  ) => {
+    if (!options.onEvent) return;
+    const eventStep = extra && "step" in extra ? extra.step : step.value;
+    options.onEvent({
+      at: new Date().toISOString(),
+      isReplay: controller.isReplay.value,
+      name,
+      runId: controller.runId.value,
+      reason: extra?.reason,
+      route:
+        typeof window === "undefined" ? undefined : window.location.pathname,
+      stepCount: stepCount.value,
+      stepIndex: index.value,
+      stepTitle: eventStep?.title,
+      target: eventStep?.target,
+      tutorialSlug: options.tutorialSlug?.(),
+    });
+  };
 
-	const next = () => {
-		emitEvent("step_completed");
-		if (isLast.value) {
-			emitEvent("tour_completed");
-			onClose();
+  const next = () => {
+    emitEvent("step_completed");
+    if (isLast.value) {
+      emitEvent("tour_completed");
+      onClose();
 
-			return;
-		}
-		index.value += 1;
-	};
-	const back = () => {
-		if (index.value > 0) index.value -= 1;
-	};
-	// `reason` distinguishes the Skip button from Escape; the host's template
-	// passes a MouseEvent through @click, so only accept real strings.
-	const skip = (reason?: unknown) => {
-		emitEvent("tour_skipped", {
-			reason: typeof reason === "string" ? reason : "skip",
-		});
-		onClose();
-	};
+      return;
+    }
+    index.value += 1;
+  };
+  const back = () => {
+    if (index.value > 0) index.value -= 1;
+  };
+  // `reason` distinguishes the Skip button from Escape; the host's template
+  // passes a MouseEvent through @click, so only accept real strings.
+  const skip = (reason?: unknown) => {
+    emitEvent("tour_skipped", {
+      reason: typeof reason === "string" ? reason : "skip",
+    });
+    onClose();
+  };
 
-	// Tear down any per-step advance hooks (timer / click-to-advance).
-	const clearAdvance = () => {
-		if (advanceTimer) {
-			clearTimeout(advanceTimer);
-			advanceTimer = 0;
-		}
-		if (clickAdvanceEl) {
-			clickAdvanceEl.removeEventListener("click", onTargetClick);
-			clickAdvanceEl = null;
-		}
-	};
-	function onTargetClick() {
-		next();
-	}
+  // Tear down any per-step advance hooks (timer / click-to-advance).
+  const clearAdvance = () => {
+    if (advanceTimer) {
+      clearTimeout(advanceTimer);
+      advanceTimer = 0;
+    }
+    if (clickAdvanceEl) {
+      clickAdvanceEl.removeEventListener("click", onTargetClick);
+      clickAdvanceEl = null;
+    }
+  };
+  function onTargetClick() {
+    next();
+  }
 
-	const actionContextFor = (
-		current: TourStep,
-		target: Element | null,
-		signal: AbortSignal,
-	) => ({
-		back,
-		index: index.value,
-		next,
-		signal,
-		step: current,
-		stop: skip,
-		target,
-	});
+  const actionContextFor = (
+    current: TourStep,
+    target: Element | null,
+    signal: AbortSignal,
+  ) => ({
+    back,
+    index: index.value,
+    next,
+    signal,
+    step: current,
+    stop: skip,
+    target,
+  });
 
-	const actionHooks = {
-		onError: (failedRef: { action: string }) =>
-			emitEvent("action_failed", { reason: failedRef.action }),
-	};
+  const actionHooks = {
+    onError: (failedRef: { action: string }) =>
+      emitEvent("action_failed", { reason: failedRef.action }),
+  };
 
-	// Cancel any in-flight action run, then fire the finished step's onExit
-	// (cleanup) actions. Returns the fresh AbortController for the next run.
-	const rotateActions = () => {
-		actionAbort?.abort();
-		const abort = new AbortController();
-		actionAbort = abort;
-		const exitStep = actionStep;
-		const exitEl = actionEl;
-		actionStep = null;
-		actionEl = null;
-		const exited = exitStep?.onExit
-			? runTourActions(
-					exitStep.onExit,
-					actions,
-					actionContextFor(exitStep, exitEl, abort.signal),
-					actionHooks,
-				)
-			: Promise.resolve();
+  // Cancel any in-flight action run, then fire the finished step's onExit
+  // (cleanup) actions. Returns the fresh AbortController for the next run.
+  const rotateActions = () => {
+    actionAbort?.abort();
+    const abort = new AbortController();
+    actionAbort = abort;
+    const exitStep = actionStep;
+    const exitEl = actionEl;
+    actionStep = null;
+    actionEl = null;
+    const exited = exitStep?.onExit
+      ? runTourActions(
+          exitStep.onExit,
+          actions,
+          actionContextFor(exitStep, exitEl, abort.signal),
+          actionHooks,
+        )
+      : Promise.resolve();
 
-		return { abort, exited };
-	};
+    return { abort, exited };
+  };
 
-	const enterActions = (
-		current: TourStep,
-		node: Element | null,
-		abort: AbortController,
-	) => {
-		actionStep = current;
-		actionEl = node;
-		if (!current.onEnter) return;
-		// Fire-and-forget so the card shows while the demo plays.
-		void runTourActions(
-			current.onEnter,
-			actions,
-			actionContextFor(current, node, abort.signal),
-			actionHooks,
-		);
-	};
+  const enterActions = (
+    current: TourStep,
+    node: Element | null,
+    abort: AbortController,
+  ) => {
+    actionStep = current;
+    actionEl = node;
+    if (!current.onEnter) return;
+    // Fire-and-forget so the card shows while the demo plays.
+    void runTourActions(
+      current.onEnter,
+      actions,
+      actionContextFor(current, node, abort.signal),
+      actionHooks,
+    );
+  };
 
-	// The card's call-to-action ("Try it now"): run its action refs through
-	// the registry, then advance unless the step opts out.
-	const runCta = async () => {
-		const current = step.value;
-		const cta = current?.cta;
-		if (!current || !cta) return;
-		if (cta.actions?.length && actionAbort) {
-			await runTourActions(
-				cta.actions,
-				actions,
-				actionContextFor(current, currentEl, actionAbort.signal),
-				actionHooks,
-			);
-		}
-		if (cta.advance !== false) next();
-	};
+  // The card's call-to-action ("Try it now"): run its action refs through
+  // the registry, then advance unless the step opts out.
+  const runCta = async () => {
+    const current = step.value;
+    const cta = current?.cta;
+    if (!current || !cta) return;
+    if (cta.actions?.length && actionAbort) {
+      await runTourActions(
+        cta.actions,
+        actions,
+        actionContextFor(current, currentEl, actionAbort.signal),
+        actionHooks,
+      );
+    }
+    if (cta.advance !== false) next();
+  };
 
-	const armAdvance = (node: Element | null) => {
-		const advance = step.value?.advance;
-		if (!advance || !advance.on || advance.on === "button") return;
-		if (advance.on === "timer") {
-			advanceTimer = window.setTimeout(
-				() => next(),
-				advance.delayMs ?? DEFAULT_TIMER_MS,
-			);
-		} else if (advance.on === "target-click" && node) {
-			clickAdvanceEl = node;
-			node.addEventListener("click", onTargetClick);
-		}
-	};
+  const armAdvance = (node: Element | null) => {
+    const advance = step.value?.advance;
+    if (!advance || !advance.on || advance.on === "button") return;
+    if (advance.on === "timer") {
+      advanceTimer = window.setTimeout(
+        () => next(),
+        advance.delayMs ?? DEFAULT_TIMER_MS,
+      );
+    } else if (advance.on === "target-click" && node) {
+      clickAdvanceEl = node;
+      node.addEventListener("click", onTargetClick);
+    }
+  };
 
-	// Branch evaluation for the step at `stepIndex`: skipped when its mobile
-	// block says so, any skipIf holds, or any showIf fails.
-	const stepSkippedAt = (stepIndex: number) => {
-		const base = steps.value[stepIndex];
-		if (!base) return false;
-		if (isMobile.value && base.mobile?.skip) return true;
-		if (
-			base.skipIf?.some((condition) =>
-				evaluateTourCondition(condition, conditions),
-			)
-		) {
-			return true;
-		}
+  // Branch evaluation for the step at `stepIndex`: skipped when its mobile
+  // block says so, any skipIf holds, or any showIf fails.
+  const stepSkippedAt = (stepIndex: number) => {
+    const base = steps.value[stepIndex];
+    if (!base) return false;
+    if (isMobile.value && base.mobile?.skip) return true;
+    if (
+      base.skipIf?.some((condition) =>
+        evaluateTourCondition(condition, conditions),
+      )
+    ) {
+      return true;
+    }
 
-		return Boolean(
-			base.showIf &&
-				!base.showIf.every((condition) =>
-					evaluateTourCondition(condition, conditions),
-				),
-		);
-	};
+    return Boolean(
+      base.showIf &&
+      !base.showIf.every((condition) =>
+        evaluateTourCondition(condition, conditions),
+      ),
+    );
+  };
 
-	const locate = async () => {
-		// stop() resets the index to 0, which re-fires the index watcher — a
-		// dead tour must never locate (it would follow step 0's route and
-		// NAVIGATE the user away right after they closed it).
-		if (!active.value) return;
-		// Cross-page resume: don't position (or navigate!) against a stand-in
-		// step list while the host is still fetching the real tutorial.
-		if (options.ready && !options.ready()) return;
-		// A persisted run can outlive its tutorial (steps edited/shortened
-		// between sessions). Clamp to the final step instead of going
-		// invisible-but-active — the "trapped in a tour" failure where the
-		// overlay state is stuck on with no card left to escape from.
-		if (steps.value.length > 0 && index.value >= steps.value.length) {
-			index.value = steps.value.length - 1; // re-enters via the watcher
+  const locate = async () => {
+    // stop() resets the index to 0, which re-fires the index watcher — a
+    // dead tour must never locate (it would follow step 0's route and
+    // NAVIGATE the user away right after they closed it).
+    if (!active.value) return;
+    // Cross-page resume: don't position (or navigate!) against a stand-in
+    // step list while the host is still fetching the real tutorial.
+    if (options.ready && !options.ready()) return;
+    // A persisted run can outlive its tutorial (steps edited/shortened
+    // between sessions). Clamp to the final step instead of going
+    // invisible-but-active — the "trapped in a tour" failure where the
+    // overlay state is stuck on with no card left to escape from.
+    if (steps.value.length > 0 && index.value >= steps.value.length) {
+      index.value = steps.value.length - 1; // re-enters via the watcher
 
-			return;
-		}
-		locateToken += 1;
-		const token = locateToken;
-		clearAdvance();
-		const { abort, exited } = rotateActions();
-		currentEl = null;
-		targetRect.value = null;
-		// Let the previous step's cleanup finish before moving (it may restore
-		// UI the next step depends on) — unless a newer locate superseded us.
-		await exited;
-		if (token !== locateToken) return;
+      return;
+    }
+    locateToken += 1;
+    const token = locateToken;
+    clearAdvance();
+    const { abort, exited } = rotateActions();
+    currentEl = null;
+    targetRect.value = null;
+    // Let the previous step's cleanup finish before moving (it may restore
+    // UI the next step depends on) — unless a newer locate superseded us.
+    await exited;
+    if (token !== locateToken) return;
 
-		// Branching: hop over ineligible steps in the direction of travel.
-		// Scanning to the final index FIRST (then re-entering via the index
-		// watcher) keeps this loop-free.
-		if (stepSkippedAt(index.value)) {
-			const direction = index.value >= lastIndex ? 1 : -1;
-			let probe = index.value + direction;
-			while (
-				probe >= 0 &&
-				probe < steps.value.length &&
-				stepSkippedAt(probe)
-			) {
-				probe += direction;
-			}
-			// Going back into all-skipped territory: fall forward instead.
-			if (probe < 0) {
-				probe = index.value + 1;
-				while (probe < steps.value.length && stepSkippedAt(probe)) {
-					probe += 1;
-				}
-			}
-			if (probe >= steps.value.length) {
-				// Nothing left to show — the tour is over.
-				emitEvent("tour_completed", { reason: "remaining-skipped" });
-				onClose();
+    // Branching: hop over ineligible steps in the direction of travel.
+    // Scanning to the final index FIRST (then re-entering via the index
+    // watcher) keeps this loop-free.
+    if (stepSkippedAt(index.value)) {
+      const direction = index.value >= lastIndex ? 1 : -1;
+      let probe = index.value + direction;
+      while (probe >= 0 && probe < steps.value.length && stepSkippedAt(probe)) {
+        probe += direction;
+      }
+      // Going back into all-skipped territory: fall forward instead.
+      if (probe < 0) {
+        probe = index.value + 1;
+        while (probe < steps.value.length && stepSkippedAt(probe)) {
+          probe += 1;
+        }
+      }
+      if (probe >= steps.value.length) {
+        // Nothing left to show — the tour is over.
+        emitEvent("tour_completed", { reason: "remaining-skipped" });
+        onClose();
 
-				return;
-			}
-			lastIndex = index.value;
-			index.value = probe; // re-enters locate via the index watcher
+        return;
+      }
+      lastIndex = index.value;
+      index.value = probe; // re-enters locate via the index watcher
 
-			return;
-		}
-		lastIndex = index.value;
+      return;
+    }
+    lastIndex = index.value;
 
-		const current = step.value;
-		if (!current) return;
+    const current = step.value;
+    if (!current) return;
 
-		if (current.route && route.path !== current.route) {
-			await router.push(current.route);
-		}
-		if (token !== locateToken) return;
+    if (current.route && route.path !== current.route) {
+      await router.push(current.route);
+    }
+    if (token !== locateToken) return;
 
-		// Hold the step until the app is ready for it (a panel rendered, a
-		// host predicate true) — past the timeout, show it anyway.
-		if (current.waitFor) {
-			const timeout = current.waitFor.timeoutMs ?? TARGET_WAIT_MS;
-			if (current.waitFor.selector) {
-				await waitForEl(current.waitFor.selector, timeout);
-			} else if (current.waitFor.condition) {
-				await waitForTourCondition(
-					current.waitFor.condition,
-					conditions,
-					timeout,
-				);
-			}
-			if (token !== locateToken) return;
-		}
+    // Hold the step until the app is ready for it (a panel rendered, a
+    // host predicate true) — past the timeout, show it anyway.
+    if (current.waitFor) {
+      const timeout = current.waitFor.timeoutMs ?? TARGET_WAIT_MS;
+      if (current.waitFor.selector) {
+        await waitForEl(current.waitFor.selector, timeout);
+      } else if (current.waitFor.condition) {
+        await waitForTourCondition(
+          current.waitFor.condition,
+          conditions,
+          timeout,
+        );
+      }
+      if (token !== locateToken) return;
+    }
 
-		if (!current.target) {
-			armAdvance(null); // timer can still drive a centered step
-			enterActions(current, null, abort);
-			emitEvent("step_viewed");
+    if (!current.target) {
+      armAdvance(null); // timer can still drive a centered step
+      enterActions(current, null, abort);
+      emitEvent("step_viewed");
 
-			return;
-		}
+      return;
+    }
 
-		const node = await waitForEl(current.target, TARGET_WAIT_MS);
-		if (token !== locateToken) return;
-		if (!node) {
-			// Missing target degrades to a centered card — its actions still run.
-			emitEvent("step_target_missing");
-			enterActions(current, null, abort);
-			emitEvent("step_viewed");
+    const node = await waitForEl(current.target, TARGET_WAIT_MS);
+    if (token !== locateToken) return;
+    if (!node) {
+      // Missing target degrades to a centered card — its actions still run.
+      emitEvent("step_target_missing");
+      enterActions(current, null, abort);
+      emitEvent("step_viewed");
 
-			return;
-		}
+      return;
+    }
 
-		currentEl = node;
-		node.scrollIntoView({ block: "center", inline: "nearest" });
-		await nextTick();
-		const remeasure = () => {
-			if (token === locateToken) measure();
-		};
-		requestAnimationFrame(remeasure);
-		SETTLE_DELAYS_MS.forEach((delay) => setTimeout(remeasure, delay));
-		armAdvance(node);
-		enterActions(current, node, abort);
-		emitEvent("step_viewed");
-	};
+    currentEl = node;
+    node.scrollIntoView({ block: "center", inline: "nearest" });
+    await nextTick();
+    const remeasure = () => {
+      if (token === locateToken) measure();
+    };
+    requestAnimationFrame(remeasure);
+    SETTLE_DELAYS_MS.forEach((delay) => setTimeout(remeasure, delay));
+    armAdvance(node);
+    enterActions(current, node, abort);
+    emitEvent("step_viewed");
+  };
 
-	const onKey = (event: KeyboardEvent) => {
-		if (!active.value) return;
-		if (event.key === "Escape") skip("escape");
-		else if (event.key === "ArrowRight" || event.key === "Enter") next();
-		else if (event.key === "ArrowLeft") back();
-	};
+  const onKey = (event: KeyboardEvent) => {
+    if (!active.value) return;
+    if (event.key === "Escape") skip("escape");
+    else if (event.key === "ArrowRight" || event.key === "Enter") next();
+    else if (event.key === "ArrowLeft") back();
+  };
 
-	const spotlightStyle = computed(() => {
-		const rect = targetRect.value;
-		if (!rect) return { display: "none" };
-		const space = pad.value;
-		const circle = step.value?.spotlight?.shape === "circle";
-		const radius = circle
-			? "50%"
-			: `${step.value?.spotlight?.radius ?? DEFAULT_RADIUS}px`;
+  const spotlightStyle = computed(() => {
+    const rect = targetRect.value;
+    if (!rect) return { display: "none" };
+    const space = pad.value;
+    const circle = step.value?.spotlight?.shape === "circle";
+    const radius = circle
+      ? "50%"
+      : `${step.value?.spotlight?.radius ?? DEFAULT_RADIUS}px`;
 
-		return {
-			borderRadius: radius,
-			height: `${rect.height + space * 2}px`,
-			left: `${rect.left - space}px`,
-			top: `${rect.top - space}px`,
-			width: `${rect.width + space * 2}px`,
-		};
-	});
+    return {
+      borderRadius: radius,
+      height: `${rect.height + space * 2}px`,
+      left: `${rect.left - space}px`,
+      top: `${rect.top - space}px`,
+      width: `${rect.width + space * 2}px`,
+    };
+  });
 
-	// The click-blocking layer(s). Normally one full-screen blocker; when the
-	// step allows interaction, four rects AROUND the target so the highlighted
-	// element stays clickable (the visual dim still comes from the spotlight's
-	// box-shadow).
-	const blockers = computed(() => {
-		const rect = targetRect.value;
-		const full: Record<string, string> = {
-			bottom: "0",
-			left: "0",
-			right: "0",
-			top: "0",
-		};
-		if (!rect || !step.value?.spotlight?.allowInteraction) return [full];
+  // The click-blocking layer(s). Normally one full-screen blocker; when the
+  // step allows interaction, four rects AROUND the target so the highlighted
+  // element stays clickable (the visual dim still comes from the spotlight's
+  // box-shadow).
+  const blockers = computed(() => {
+    const rect = targetRect.value;
+    const full: Record<string, string> = {
+      bottom: "0",
+      left: "0",
+      right: "0",
+      top: "0",
+    };
+    if (!rect || !step.value?.spotlight?.allowInteraction) return [full];
 
-		const space = pad.value;
-		const bandTop: Record<string, string> = {
-			bottom: "auto",
-			height: `${Math.max(0, rect.top - space)}px`,
-			left: "0",
-			right: "0",
-			top: "0",
-		};
-		const bandBottom: Record<string, string> = {
-			bottom: "0",
-			left: "0",
-			right: "0",
-			top: `${rect.bottom + space}px`,
-		};
-		const bandLeft: Record<string, string> = {
-			height: `${rect.height + space * 2}px`,
-			left: "0",
-			top: `${rect.top - space}px`,
-			width: `${Math.max(0, rect.left - space)}px`,
-		};
-		const bandRight: Record<string, string> = {
-			height: `${rect.height + space * 2}px`,
-			left: `${rect.right + space}px`,
-			right: "0",
-			top: `${rect.top - space}px`,
-		};
+    const space = pad.value;
+    const bandTop: Record<string, string> = {
+      bottom: "auto",
+      height: `${Math.max(0, rect.top - space)}px`,
+      left: "0",
+      right: "0",
+      top: "0",
+    };
+    const bandBottom: Record<string, string> = {
+      bottom: "0",
+      left: "0",
+      right: "0",
+      top: `${rect.bottom + space}px`,
+    };
+    const bandLeft: Record<string, string> = {
+      height: `${rect.height + space * 2}px`,
+      left: "0",
+      top: `${rect.top - space}px`,
+      width: `${Math.max(0, rect.left - space)}px`,
+    };
+    const bandRight: Record<string, string> = {
+      height: `${rect.height + space * 2}px`,
+      left: `${rect.right + space}px`,
+      right: "0",
+      top: `${rect.top - space}px`,
+    };
 
-		return [bandTop, bandBottom, bandLeft, bandRight];
-	});
+    return [bandTop, bandBottom, bandLeft, bandRight];
+  });
 
-	const showBeacon = computed(() => Boolean(step.value?.beacon && targetRect.value));
-	const beaconStyle = computed(() => {
-		const rect = targetRect.value;
-		if (!rect) return { display: "none" };
+  const showBeacon = computed(() =>
+    Boolean(step.value?.beacon && targetRect.value),
+  );
+  const beaconStyle = computed(() => {
+    const rect = targetRect.value;
+    if (!rect) return { display: "none" };
 
-		return { left: `${rect.right - 6}px`, top: `${rect.top - 6}px` };
-	});
+    return { left: `${rect.right - 6}px`, top: `${rect.top - 6}px` };
+  });
 
-	// Position from the card's MEASURED size: flip to the roomier side when the
-	// preferred one can't fit it, then clamp both axes so the card (and its
-	// Skip/Next controls) can never leave the viewport — an off-screen card is
-	// a blocked page with no visible way out.
-	const tooltipStyle = computed(() => {
-		const rect = targetRect.value;
-		if (!rect) return {};
+  // Position from the card's MEASURED size: flip to the roomier side when the
+  // preferred one can't fit it, then clamp both axes so the card (and its
+  // Skip/Next controls) can never leave the viewport — an off-screen card is
+  // a blocked page with no visible way out.
+  const tooltipStyle = computed(() => {
+    const rect = targetRect.value;
+    if (!rect) return {};
 
-		const { height: cardH, width: cardW } = tooltipSize.value;
-		const viewW = window.innerWidth;
-		const viewH = window.innerHeight;
-		const clampLeft = (value: number) =>
-			clamp(
-				value,
-				VIEWPORT_MARGIN,
-				Math.max(VIEWPORT_MARGIN, viewW - cardW - VIEWPORT_MARGIN),
-			);
-		const clampTop = (value: number) =>
-			clamp(
-				value,
-				VIEWPORT_MARGIN,
-				Math.max(VIEWPORT_MARGIN, viewH - cardH - VIEWPORT_MARGIN),
-			);
-		const fitsAbove = rect.top - GAP - cardH >= VIEWPORT_MARGIN;
-		const fitsBelow = rect.bottom + GAP + cardH <= viewH - VIEWPORT_MARGIN;
-		const fitsLeft = rect.left - GAP - cardW >= VIEWPORT_MARGIN;
-		const fitsRight = rect.right + GAP + cardW <= viewW - VIEWPORT_MARGIN;
+    const { height: cardH, width: cardW } = tooltipSize.value;
+    const viewW = window.innerWidth;
+    const viewH = window.innerHeight;
+    const clampLeft = (value: number) =>
+      clamp(
+        value,
+        VIEWPORT_MARGIN,
+        Math.max(VIEWPORT_MARGIN, viewW - cardW - VIEWPORT_MARGIN),
+      );
+    const clampTop = (value: number) =>
+      clamp(
+        value,
+        VIEWPORT_MARGIN,
+        Math.max(VIEWPORT_MARGIN, viewH - cardH - VIEWPORT_MARGIN),
+      );
+    const fitsAbove = rect.top - GAP - cardH >= VIEWPORT_MARGIN;
+    const fitsBelow = rect.bottom + GAP + cardH <= viewH - VIEWPORT_MARGIN;
+    const fitsLeft = rect.left - GAP - cardW >= VIEWPORT_MARGIN;
+    const fitsRight = rect.right + GAP + cardW <= viewW - VIEWPORT_MARGIN;
 
-		let placement = step.value?.placement ?? "bottom";
-		if (placement === "bottom" && !fitsBelow && fitsAbove) placement = "top";
-		else if (placement === "top" && !fitsAbove && fitsBelow) {
-			placement = "bottom";
-		} else if (placement === "right" && !fitsRight && fitsLeft) {
-			placement = "left";
-		} else if (placement === "left" && !fitsLeft && fitsRight) {
-			placement = "right";
-		}
+    let placement = step.value?.placement ?? "bottom";
+    if (placement === "bottom" && !fitsBelow && fitsAbove) placement = "top";
+    else if (placement === "top" && !fitsAbove && fitsBelow) {
+      placement = "bottom";
+    } else if (placement === "right" && !fitsRight && fitsLeft) {
+      placement = "left";
+    } else if (placement === "left" && !fitsLeft && fitsRight) {
+      placement = "right";
+    }
 
-		if (placement === "right") {
-			return {
-				left: `${clampLeft(rect.right + GAP)}px`,
-				top: `${clampTop(rect.top)}px`,
-			};
-		}
-		if (placement === "left") {
-			return {
-				left: `${clampLeft(rect.left - GAP - cardW)}px`,
-				top: `${clampTop(rect.top)}px`,
-			};
-		}
-		const left = clampLeft(rect.left + rect.width / 2 - cardW / 2);
-		if (placement === "top") {
-			return {
-				left: `${left}px`,
-				top: `${clampTop(rect.top - GAP - cardH)}px`,
-			};
-		}
+    if (placement === "right") {
+      return {
+        left: `${clampLeft(rect.right + GAP)}px`,
+        top: `${clampTop(rect.top)}px`,
+      };
+    }
+    if (placement === "left") {
+      return {
+        left: `${clampLeft(rect.left - GAP - cardW)}px`,
+        top: `${clampTop(rect.top)}px`,
+      };
+    }
+    const left = clampLeft(rect.left + rect.width / 2 - cardW / 2);
+    if (placement === "top") {
+      return {
+        left: `${left}px`,
+        top: `${clampTop(rect.top - GAP - cardH)}px`,
+      };
+    }
 
-		return { left: `${left}px`, top: `${clampTop(rect.bottom + GAP)}px` };
-	});
+    return { left: `${left}px`, top: `${clampTop(rect.bottom + GAP)}px` };
+  });
 
-	// Entrance animation for the card — re-keyed per step so it replays.
-	const cardAnimationStyle = computed(() => {
-		const transition = step.value?.transition;
-		const kind = transition?.kind ?? "fade";
-		if (kind === "none") return {};
-		const ms = transition?.durationMs ?? DEFAULT_TRANSITION_MS;
+  // Entrance animation for the card — re-keyed per step so it replays.
+  const cardAnimationStyle = computed(() => {
+    const transition = step.value?.transition;
+    const kind = transition?.kind ?? "fade";
+    if (kind === "none") return {};
+    const ms = transition?.durationMs ?? DEFAULT_TRANSITION_MS;
 
-		return { animation: `tour-${kind} ${ms}ms cubic-bezier(0.16,1,0.3,1)` };
-	});
+    return { animation: `tour-${kind} ${ms}ms cubic-bezier(0.16,1,0.3,1)` };
+  });
 
-	// Per-tutorial theme → CSS custom properties (only the ones provided).
-	const themeVars = computed(() => {
-		const theme = options.theme?.();
-		const vars: Record<string, string> = {
-			"--tour-dim": String(theme?.dimOpacity ?? DEFAULT_DIM),
-		};
-		if (theme?.accent) vars["--tour-accent"] = theme.accent;
-		if (theme?.accentText) vars["--tour-accent-text"] = theme.accentText;
-		if (theme?.surface) vars["--tour-surface"] = theme.surface;
-		if (theme?.textColor) vars["--tour-text"] = theme.textColor;
-		if (theme?.radius) vars["--tour-radius"] = theme.radius;
+  // Per-tutorial theme → CSS custom properties (only the ones provided).
+  const themeVars = computed(() => {
+    const theme = options.theme?.();
+    const vars: Record<string, string> = {
+      "--tour-dim": String(theme?.dimOpacity ?? DEFAULT_DIM),
+    };
+    if (theme?.accent) vars["--tour-accent"] = theme.accent;
+    if (theme?.accentText) vars["--tour-accent-text"] = theme.accentText;
+    if (theme?.surface) vars["--tour-surface"] = theme.surface;
+    if (theme?.textColor) vars["--tour-text"] = theme.textColor;
+    if (theme?.radius) vars["--tour-radius"] = theme.radius;
 
-		return vars;
-	});
+    return vars;
+  });
 
-	watch(active, (isActive) => {
-		if (isActive) {
-			// Only a genuine start — cross-page resume mounts with active
-			// already true and never re-fires this watcher.
-			emitEvent("tour_started");
-			lastIndex = index.value;
-			void locate();
-		} else {
-			clearAdvance();
-			// Closing the tour still runs the last step's cleanup actions.
-			const { exited } = rotateActions();
-			void exited;
-		}
-	});
-	watch(index, () => void locate());
-	// The host can swap the step LIST under a running tour (async tutorial
-	// fetch on a cross-page resume) — re-position against the real steps.
-	watch(steps, () => {
-		if (active.value) void locate();
-	});
-	if (options.ready) {
-		watch(options.ready, (isReady) => {
-			if (isReady && active.value) void locate();
-		});
-	}
+  watch(active, (isActive) => {
+    if (isActive) {
+      // Only a genuine start — cross-page resume mounts with active
+      // already true and never re-fires this watcher.
+      emitEvent("tour_started");
+      lastIndex = index.value;
+      void locate();
+    } else {
+      clearAdvance();
+      // Closing the tour still runs the last step's cleanup actions.
+      const { exited } = rotateActions();
+      void exited;
+    }
+  });
+  watch(index, () => void locate());
+  // The host can swap the step LIST under a running tour (async tutorial
+  // fetch on a cross-page resume) — re-position against the real steps.
+  watch(steps, () => {
+    if (active.value) void locate();
+  });
+  if (options.ready) {
+    watch(options.ready, (isReady) => {
+      if (isReady && active.value) void locate();
+    });
+  }
 
-	let trackTimer = 0;
-	onMounted(() => {
-		mobileMedia = window.matchMedia(
-			options.mobileQuery ?? DEFAULT_MOBILE_QUERY,
-		);
-		isMobile.value = mobileMedia.matches;
-		mobileMedia.addEventListener("change", onMobileMediaChange);
-		window.addEventListener("resize", measure);
-		window.addEventListener("scroll", measure, true);
-		window.addEventListener("keydown", onKey);
-		trackTimer = window.setInterval(() => {
-			if (active.value && currentEl) measure();
-		}, TRACK_INTERVAL_MS);
-		// Resume after a cross-page reload — index/active restored from storage.
-		if (active.value) {
-			lastIndex = index.value;
-			void locate();
-		}
-	});
-	onBeforeUnmount(() => {
-		mobileMedia?.removeEventListener("change", onMobileMediaChange);
-		window.removeEventListener("resize", measure);
-		window.removeEventListener("scroll", measure, true);
-		window.removeEventListener("keydown", onKey);
-		clearInterval(trackTimer);
-		clearAdvance();
-		actionAbort?.abort();
-	});
+  let trackTimer = 0;
+  onMounted(() => {
+    mobileMedia = window.matchMedia(
+      options.mobileQuery ?? DEFAULT_MOBILE_QUERY,
+    );
+    isMobile.value = mobileMedia.matches;
+    mobileMedia.addEventListener("change", onMobileMediaChange);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("keydown", onKey);
+    trackTimer = window.setInterval(() => {
+      if (active.value && currentEl) measure();
+    }, TRACK_INTERVAL_MS);
+    // Resume after a cross-page reload — index/active restored from storage.
+    if (active.value) {
+      lastIndex = index.value;
+      void locate();
+    }
+  });
+  onBeforeUnmount(() => {
+    mobileMedia?.removeEventListener("change", onMobileMediaChange);
+    window.removeEventListener("resize", measure);
+    window.removeEventListener("scroll", measure, true);
+    window.removeEventListener("keydown", onKey);
+    clearInterval(trackTimer);
+    clearAdvance();
+    actionAbort?.abort();
+  });
 
-	return {
-		active,
-		back,
-		beaconStyle,
-		blockers,
-		cardAnimationStyle,
-		index,
-		isCentered,
-		isFirst,
-		isLast,
-		isMobile,
-		next,
-		runCta,
-		showBeacon,
-		skip,
-		spotlightStyle,
-		step,
-		stepCount,
-		themeVars,
-		tooltipEl,
-		tooltipStyle,
-	};
+  return {
+    active,
+    back,
+    beaconStyle,
+    blockers,
+    cardAnimationStyle,
+    index,
+    isCentered,
+    isFirst,
+    isLast,
+    isMobile,
+    next,
+    runCta,
+    showBeacon,
+    skip,
+    spotlightStyle,
+    step,
+    stepCount,
+    themeVars,
+    tooltipEl,
+    tooltipStyle,
+  };
 };

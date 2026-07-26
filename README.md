@@ -32,19 +32,24 @@ bun add @absolutejs/tour
 import type { Tutorial } from "@absolutejs/tour";
 
 const tour: Tutorial = {
-	slug: "portal-intro",
-	trigger: { firstVisitOnly: true, onRoutePrefix: "/portal" },
-	steps: [
-		{ title: "Welcome", body: "A quick tour.", placement: "center", route: "/dashboard" },
-		{
-			title: "Your command center",
-			body: "Your single best next step is always one click here.",
-			route: "/dashboard",
-			target: '[data-tour=\"hero\"]',
-			placement: "bottom",
-		},
-		// …intake, matches, network — each navigates and spotlights a real element
-	],
+  slug: "portal-intro",
+  trigger: { firstVisitOnly: true, onRoutePrefix: "/portal" },
+  steps: [
+    {
+      title: "Welcome",
+      body: "A quick tour.",
+      placement: "center",
+      route: "/dashboard",
+    },
+    {
+      title: "Your command center",
+      body: "Your single best next step is always one click here.",
+      route: "/dashboard",
+      target: '[data-tour=\"hero\"]',
+      placement: "bottom",
+    },
+    // …intake, matches, network — each navigates and spotlights a real element
+  ],
 };
 ```
 
@@ -76,31 +81,31 @@ import { PORTAL_TOUR_STEPS } from "./steps";
 const controller = useTourController("myapp.tour");
 const emit = defineEmits<{ close: [] }>();
 const t = useSpotlight({
-	steps: () => PORTAL_TOUR_STEPS,
-	controller,
-	onClose: () => emit("close"),
+  steps: () => PORTAL_TOUR_STEPS,
+  controller,
+  onClose: () => emit("close"),
 });
 </script>
 
 <template>
-	<Teleport to="body">
-		<div v-if="t.active.value && t.step.value" class="tour-root">
-			<div class="tour-blocker" :class="{ dim: t.isCentered.value }"></div>
-			<div class="tour-spotlight" :style="t.spotlightStyle.value"></div>
-			<div
-				class="tour-tooltip"
-				:class="{ centered: t.isCentered.value }"
-				:style="t.isCentered.value ? {} : t.tooltipStyle.value"
-			>
-				<p>Step {{ t.index.value + 1 }} of {{ t.stepCount.value }}</p>
-				<h3>{{ t.step.value.title }}</h3>
-				<p>{{ t.step.value.body }}</p>
-				<button @click="t.skip">Skip</button>
-				<button v-if="!t.isFirst.value" @click="t.back">Back</button>
-				<button @click="t.next">{{ t.isLast.value ? "Done" : "Next" }}</button>
-			</div>
-		</div>
-	</Teleport>
+  <Teleport to="body">
+    <div v-if="t.active.value && t.step.value" class="tour-root">
+      <div class="tour-blocker" :class="{ dim: t.isCentered.value }"></div>
+      <div class="tour-spotlight" :style="t.spotlightStyle.value"></div>
+      <div
+        class="tour-tooltip"
+        :class="{ centered: t.isCentered.value }"
+        :style="t.isCentered.value ? {} : t.tooltipStyle.value"
+      >
+        <p>Step {{ t.index.value + 1 }} of {{ t.stepCount.value }}</p>
+        <h3>{{ t.step.value.title }}</h3>
+        <p>{{ t.step.value.body }}</p>
+        <button @click="t.skip">Skip</button>
+        <button v-if="!t.isFirst.value" @click="t.back">Back</button>
+        <button @click="t.next">{{ t.isLast.value ? "Done" : "Next" }}</button>
+      </div>
+    </div>
+  </Teleport>
 </template>
 ```
 
@@ -121,8 +126,8 @@ import { useTourActions } from "@absolutejs/tour";
 
 const actions = useTourActions();
 const unregister = actions.register("matches.demo-swipe", async (ctx) => {
-	const direction = ctx.args.direction === "left" ? "left" : "right";
-	await swiper.value?.demoSwipe(direction); // ctx.signal aborts long demos
+  const direction = ctx.args.direction === "left" ? "left" : "right";
+  await swiper.value?.demoSwipe(direction); // ctx.signal aborts long demos
 });
 onBeforeUnmount(unregister);
 ```
@@ -161,10 +166,10 @@ import { useTourDemo, useTourController } from "@absolutejs/tour";
 
 const controller = useTourController("myapp.tour");
 const { data: matches, isDemo } = useTourDemo({
-	controller,
-	demo: DEMO_MATCHES, // typed PartnerMatch[] — same shape the surface renders
-	live: () => realMatches.value,
-	mode: () => tutorial.value?.dataMode, // optional per-tutorial override
+  controller,
+  demo: DEMO_MATCHES, // typed PartnerMatch[] — same shape the surface renders
+  live: () => realMatches.value,
+  mode: () => tutorial.value?.dataMode, // optional per-tutorial override
 });
 ```
 
@@ -186,9 +191,11 @@ plus a `reason` distinguishing the Skip button from Escape.
 
 ```ts
 useSpotlight({
-	steps, controller, onClose,
-	tutorialSlug: () => activeTutorial.value?.slug,
-	onEvent: (event) => analytics.track(event),
+  steps,
+  controller,
+  onClose,
+  tutorialSlug: () => activeTutorial.value?.slug,
+  onEvent: (event) => analytics.track(event),
 });
 ```
 
@@ -242,8 +249,8 @@ caps (`trigger.maxDismissals`, default 2 — after that, manual replay only),
 const gate = useTourGate({ roles: () => viewer.roles });
 const tutorial = gate.pick(publishedTutorials, route.path);
 if (tutorial) {
-	gate.recordAutoPlay(tutorial.slug ?? "");
-	controller.start();
+  gate.recordAutoPlay(tutorial.slug ?? "");
+  controller.start();
 }
 // from your onEvent sink:
 //   tour_skipped   → gate.recordDismissal(slug)
@@ -258,11 +265,11 @@ it to the `tour_completed` event).
 
 ```ts
 const checklist = useTourChecklist({
-	id: "onboarding",
-	items: () => [
-		{ id: "intake", title: "Finish your intake", href: "/portal/intake" },
-		{ id: "tour", title: "Take the tour", tutorialSlug: "portal-intro" },
-	],
+  id: "onboarding",
+  items: () => [
+    { id: "intake", title: "Finish your intake", href: "/portal/intake" },
+    { id: "tour", title: "Take the tour", tutorialSlug: "portal-intro" },
+  ],
 });
 // checklist.items → [{...item, done}], checklist.progress → {done,total,percent}
 ```
@@ -275,10 +282,15 @@ opened; dismissals persist.
 
 ```ts
 const spots = useTourHotspots({
-	hotspots: () => [
-		{ id: "trust-fit", target: '[data-tour="trust-fit"]', title: "Trust & Fit", body: "…" },
-	],
-	enabled: () => !tourController.active.value,
+  hotspots: () => [
+    {
+      id: "trust-fit",
+      target: '[data-tour="trust-fit"]',
+      title: "Trust & Fit",
+      body: "…",
+    },
+  ],
+  enabled: () => !tourController.active.value,
 });
 // render spots.beacons (beacon per target) and spots.card (open card) yourself
 ```

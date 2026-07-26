@@ -12,48 +12,46 @@ import type { TourDataMode } from "./types";
 // real matches is toured on THEIR matches, everyone else sees the sample.
 
 export type TourDemoOptions<DataShape> = {
-	/** The tour whose activity gates the swap (see useTourController). */
-	controller: TourController;
-	/** The constant sample dataset. Its type IS the contract — it must be the
-	 *  same shape as the live data, so the surface renders it unchanged. */
-	demo: DataShape;
-	/** Getter for the real data (reactive; null/undefined while absent). */
-	live: () => DataShape | null | undefined;
-	/** Does this live value count as "has data"? Default: non-nullish, and
-	 *  non-empty when it's an array. */
-	hasLive?: (value: DataShape) => boolean;
-	/** Resolution override, e.g. wired to Tutorial.dataMode. Default "auto". */
-	mode?: () => TourDataMode | undefined;
+  /** The tour whose activity gates the swap (see useTourController). */
+  controller: TourController;
+  /** The constant sample dataset. Its type IS the contract — it must be the
+   *  same shape as the live data, so the surface renders it unchanged. */
+  demo: DataShape;
+  /** Getter for the real data (reactive; null/undefined while absent). */
+  live: () => DataShape | null | undefined;
+  /** Does this live value count as "has data"? Default: non-nullish, and
+   *  non-empty when it's an array. */
+  hasLive?: (value: DataShape) => boolean;
+  /** Resolution override, e.g. wired to Tutorial.dataMode. Default "auto". */
+  mode?: () => TourDataMode | undefined;
 };
 
 export type TourDemoData<DataShape> = {
-	/** What the surface should render right now. */
-	data: ComputedRef<DataShape | null | undefined>;
-	/** True when the sample is showing — hosts should badge the surface
-	 *  ("Sample data") so the viewer never mistakes it for their own. */
-	isDemo: ComputedRef<boolean>;
+  /** What the surface should render right now. */
+  data: ComputedRef<DataShape | null | undefined>;
+  /** True when the sample is showing — hosts should badge the surface
+   *  ("Sample data") so the viewer never mistakes it for their own. */
+  isDemo: ComputedRef<boolean>;
 };
 
 const defaultHasLive = <DataShape>(value: DataShape) =>
-	Array.isArray(value) ? value.length > 0 : true;
+  Array.isArray(value) ? value.length > 0 : true;
 
 export const useTourDemo = <DataShape>(
-	options: TourDemoOptions<DataShape>,
+  options: TourDemoOptions<DataShape>,
 ): TourDemoData<DataShape> => {
-	const isDemo = computed(() => {
-		if (!options.controller.active.value) return false;
-		const mode = options.mode?.() ?? "auto";
-		if (mode === "live") return false;
-		if (mode === "demo") return true;
-		const liveValue = options.live();
-		if (liveValue === null || liveValue === undefined) return true;
+  const isDemo = computed(() => {
+    if (!options.controller.active.value) return false;
+    const mode = options.mode?.() ?? "auto";
+    if (mode === "live") return false;
+    if (mode === "demo") return true;
+    const liveValue = options.live();
+    if (liveValue === null || liveValue === undefined) return true;
 
-		return !(options.hasLive ?? defaultHasLive)(liveValue);
-	});
+    return !(options.hasLive ?? defaultHasLive)(liveValue);
+  });
 
-	const data = computed(() =>
-		isDemo.value ? options.demo : options.live(),
-	);
+  const data = computed(() => (isDemo.value ? options.demo : options.live()));
 
-	return { data, isDemo };
+  return { data, isDemo };
 };
