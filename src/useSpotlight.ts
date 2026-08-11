@@ -41,6 +41,32 @@ const DEFAULT_DIM = 0.62;
 const DEFAULT_TIMER_MS = 6000;
 const DEFAULT_TRANSITION_MS = 260;
 const DEFAULT_MOBILE_QUERY = "(max-width: 640px)";
+const NATIVE_ACTIVATION_SELECTOR = [
+  "button",
+  "a[href]",
+  "input",
+  "select",
+  "textarea",
+  '[contenteditable="true"]',
+  '[role="button"]',
+  '[role="link"]',
+].join(",");
+
+type TourKeyboardEvent = Pick<
+  KeyboardEvent,
+  "defaultPrevented" | "key" | "target"
+>;
+
+/** Keep Tour's Enter shortcut from duplicating a focused control's native activation. */
+export const shouldIgnoreTourKey = (event: TourKeyboardEvent) => {
+  if (event.defaultPrevented) return true;
+  if (event.key !== "Enter") return false;
+  const target = event.target as {
+    closest?: (selector: string) => unknown;
+  } | null;
+
+  return target?.closest?.(NATIVE_ACTIVATION_SELECTOR) != null;
+};
 
 export type SpotlightOptions = {
   /** The ordered steps to walk. A getter so it can be reactive/swappable. */
@@ -471,7 +497,7 @@ export const useSpotlight = (options: SpotlightOptions) => {
   };
 
   const onKey = (event: KeyboardEvent) => {
-    if (!active.value) return;
+    if (!active.value || shouldIgnoreTourKey(event)) return;
     if (event.key === "Escape") skip("escape");
     else if (event.key === "ArrowRight" || event.key === "Enter") next();
     else if (event.key === "ArrowLeft") back();

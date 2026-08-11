@@ -111,7 +111,10 @@ const t = useSpotlight({
 
 The host app owns: the `data-tour` anchors, the step content, and where the
 "seen" marker is stored (so finishing a first-visit run stamps it; a replay
-does not).
+does not). If the overlay is exposed as an ARIA modal, the host also owns its
+initial focus, Tab containment, and close-time focus restoration. Tour's Enter
+shortcut ignores focused native controls so their own keyboard activation
+cannot advance a step twice.
 
 ## Step actions — demo the product, don't just point at it
 
