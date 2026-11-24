@@ -9,11 +9,15 @@ import { getCurrentInstance, onMounted, ref, watch, type Ref } from "vue";
 // any "replay" button elsewhere in the app share one switch.
 //
 // Server rendering shapes two rules:
-// - The saved run is restored once the component that asked for the
+// - The saved run is restored once a component that asked for the
 //   controller has MOUNTED, not while it sets up. The server has no
 //   sessionStorage, so it always renders the tour as inactive; restoring
 //   during setup made the browser's first render show a running tour where
 //   the server's HTML had none, and Vue's hydration replaced the markup.
+//   EVERY component that asks registers the restore on its own mount, and
+//   the first to mount does it: Vue mounts children before their parents,
+//   and a child's own mount logic must already see the saved run (the
+//   restore is registered when it asks, before its own `onMounted`).
 //   Called outside a component, there is nothing to hydrate and it restores
 //   at once.
 // - On the server every member's request renders in one process, so the
@@ -33,7 +37,9 @@ export type TourController = {
   stop: () => void;
 };
 
-const registry = new Map<string, TourController>();
+type Registered = { controller: TourController; restore: () => void };
+
+const registry = new Map<string, Registered>();
 
 const newRunId = () => crypto.randomUUID();
 
@@ -108,16 +114,12 @@ export const useTourController = (
 ): TourController => {
   if (typeof window === "undefined")
     return createController(storageKey, null).controller;
-  const existing = registry.get(storageKey);
-  if (existing) return existing;
+  const registered =
+    registry.get(storageKey) ?? createController(storageKey, browserStorage());
+  registry.set(storageKey, registered);
+  // Idempotent: the first mount (or call outside a component) restores.
+  if (getCurrentInstance()) onMounted(registered.restore);
+  else registered.restore();
 
-  const { controller, restore } = createController(
-    storageKey,
-    browserStorage(),
-  );
-  registry.set(storageKey, controller);
-  if (getCurrentInstance()) onMounted(restore);
-  else restore();
-
-  return controller;
+  return registered.controller;
 };

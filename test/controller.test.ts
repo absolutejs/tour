@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createRenderer, createSSRApp, defineComponent, h } from "vue";
+import {
+  createRenderer,
+  createSSRApp,
+  defineComponent,
+  h,
+  onMounted,
+} from "vue";
 import { renderToString } from "vue/server-renderer";
 import { useTourController, type TourController } from "../src/controller";
 
@@ -103,6 +109,33 @@ describe("the tour controller and server rendering", () => {
     expect(tour.runId.value).toBe("run-from-the-previous-page");
     // The saved run was not overwritten by the defaults before restoring.
     expect(entries.get("resume.tour.index")).toBe("2");
+  });
+
+  test("a child's own mount logic already sees the saved run, though the parent asked first", () => {
+    asBrowser(savedRun("nested.tour"));
+    let seenInChildMount: boolean | undefined;
+    const Child = defineComponent({
+      setup() {
+        const tour = useTourController("nested.tour");
+        onMounted(() => {
+          // Vue mounts the child before the parent that asked first.
+          seenInChildMount = tour.active.value;
+        });
+
+        return () => h("p");
+      },
+    });
+    const Parent = defineComponent({
+      setup() {
+        useTourController("nested.tour");
+
+        return () => h(Child);
+      },
+    });
+
+    createApp(Parent).mount(fakeNode());
+
+    expect(seenInChildMount).toBe(true);
   });
 
   test("starting a tour before the saved run is restored wins over the saved run", () => {

@@ -5,6 +5,20 @@
 		{
 			"changes": [
 				{
+					"detail": "0.3.0-beta.8 restored a saved run on the mount of the FIRST component that asked for the controller. Vue mounts children before their parents, so when a layout asked first, a child's own mount logic (an overlay resuming a cross-page tour, or deciding whether to auto-play) ran before the restore, saw no run, and could restart the tour. Every component that asks now registers the restore for its own mount and the first to mount does it, before that component's own `onMounted` logic.",
+					"kind": "fixed",
+					"summary": "A tour in progress is restored before any component's own mount logic reads it",
+					"symbols": [
+						"useTourController"
+					]
+				}
+			],
+			"date": "2026-11-24",
+			"version": "0.3.0-beta.9"
+		},
+		{
+			"changes": [
+				{
 					"detail": "useTourController restored a saved run from sessionStorage while the component set up. The server has no sessionStorage and always rendered the tour as inactive, so on a server-rendered page with a tour mid-run the browser's first render showed the tour where the server's HTML had none, and Vue's hydration replaced the markup. The saved run is now restored once the component that asked for the controller has mounted (at once when called outside a component), and start() or stop() before that supersedes it. On the server each call now gets its own controller: the per-key singleton was shared by every request the process rendered.",
 					"kind": "fixed",
 					"summary": "A tour in progress no longer breaks hydration, and the server never shares a tour controller between requests",
