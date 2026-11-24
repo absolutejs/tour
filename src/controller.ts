@@ -1,12 +1,23 @@
-import { ref, watch, type Ref } from "vue";
+import { getCurrentInstance, onMounted, ref, watch, type Ref } from "vue";
 
 // A tour walks ACROSS pages, and in an MPA each page is its own app mount — so
 // moving between steps is a full page reload that would otherwise wipe progress.
 // The controller persists {active, index, isReplay, runId} in sessionStorage
 // (one key per field, no JSON) so the tour resumes on the next page at the
 // right step without fragmenting one analytics run.
-// It's a singleton per storage key, so the overlay component and any "replay"
-// button elsewhere in the app share one switch.
+// It's a singleton per storage key in the browser, so the overlay component and
+// any "replay" button elsewhere in the app share one switch.
+//
+// Server rendering shapes two rules:
+// - The saved run is restored once the component that asked for the
+//   controller has MOUNTED, not while it sets up. The server has no
+//   sessionStorage, so it always renders the tour as inactive; restoring
+//   during setup made the browser's first render show a running tour where
+//   the server's HTML had none, and Vue's hydration replaced the markup.
+//   Called outside a component, there is nothing to hydrate and it restores
+//   at once.
+// - On the server every member's request renders in one process, so the
+//   controller is never shared there: each call gets its own.
 
 export type TourController = {
   active: Ref<boolean>;
@@ -26,31 +37,34 @@ const registry = new Map<string, TourController>();
 
 const newRunId = () => crypto.randomUUID();
 
-export const useTourController = (
-  storageKey = "absolute.tour",
-): TourController => {
-  const existing = registry.get(storageKey);
-  if (existing) return existing;
+const createController = (storageKey: string, storage: Storage | null) => {
+  const active = ref(false);
+  const index = ref(0);
+  const isReplay = ref(false);
+  const runId = ref("");
+  // Until restored, nothing is written back: the defaults must never
+  // overwrite a run saved by the previous page.
+  let settled = storage === null;
 
-  const store = () =>
-    typeof sessionStorage === "undefined" ? null : sessionStorage;
-
-  const active = ref(store()?.getItem(`${storageKey}.active`) === "1");
-  const index = ref(Number(store()?.getItem(`${storageKey}.index`)) || 0);
-  const isReplay = ref(store()?.getItem(`${storageKey}.isReplay`) === "1");
-  const runId = ref(
-    store()?.getItem(`${storageKey}.runId`) || (active.value ? newRunId() : ""),
-  );
+  const restore = () => {
+    if (settled || !storage) return;
+    settled = true;
+    active.value = storage.getItem(`${storageKey}.active`) === "1";
+    index.value = Number(storage.getItem(`${storageKey}.index`)) || 0;
+    isReplay.value = storage.getItem(`${storageKey}.isReplay`) === "1";
+    runId.value =
+      storage.getItem(`${storageKey}.runId`) ||
+      (active.value ? newRunId() : "");
+  };
 
   watch([active, index, isReplay, runId], () => {
-    const target = store();
-    if (!target) return;
+    if (!settled || !storage) return;
     try {
-      target.setItem(`${storageKey}.active`, active.value ? "1" : "0");
-      target.setItem(`${storageKey}.index`, String(index.value));
-      target.setItem(`${storageKey}.isReplay`, isReplay.value ? "1" : "0");
-      if (runId.value) target.setItem(`${storageKey}.runId`, runId.value);
-      else target.removeItem(`${storageKey}.runId`);
+      storage.setItem(`${storageKey}.active`, active.value ? "1" : "0");
+      storage.setItem(`${storageKey}.index`, String(index.value));
+      storage.setItem(`${storageKey}.isReplay`, isReplay.value ? "1" : "0");
+      if (runId.value) storage.setItem(`${storageKey}.runId`, runId.value);
+      else storage.removeItem(`${storageKey}.runId`);
     } catch (err) {
       console.warn("[tour] persist failed", err);
     }
@@ -61,18 +75,49 @@ export const useTourController = (
     index,
     isReplay,
     runId,
+    // Starting or stopping is a decision about now: it supersedes a saved
+    // run that has not been restored yet.
     start: (replay = false) => {
+      settled = true;
       isReplay.value = replay;
       index.value = 0;
       runId.value = newRunId();
       active.value = true;
     },
     stop: () => {
+      settled = true;
       active.value = false;
       index.value = 0;
     },
   };
+
+  return { controller, restore };
+};
+
+const browserStorage = () => {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    // Storage blocked (privacy settings): the tour still runs, unpersisted.
+    return null;
+  }
+};
+
+export const useTourController = (
+  storageKey = "absolute.tour",
+): TourController => {
+  if (typeof window === "undefined")
+    return createController(storageKey, null).controller;
+  const existing = registry.get(storageKey);
+  if (existing) return existing;
+
+  const { controller, restore } = createController(
+    storageKey,
+    browserStorage(),
+  );
   registry.set(storageKey, controller);
+  if (getCurrentInstance()) onMounted(restore);
+  else restore();
 
   return controller;
 };
